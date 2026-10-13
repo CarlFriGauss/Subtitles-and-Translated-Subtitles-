@@ -6096,7 +6096,7 @@ def escape_ffmpeg_filter_path(path):
     return str(Path(path)).replace("\\", "/").replace(":", "\\:")
 
 
-def apply_script_safe_subtitle_style(style_config, lang_code, video_metadata=None):
+def apply_script_safe_subtitle_style(style_config, lang_code, video_metadata=None, manual_style=False):
     style = dict(style_config or {})
     if not uses_arabic_script_subtitle_font(lang_code):
         return style
@@ -6116,7 +6116,10 @@ def apply_script_safe_subtitle_style(style_config, lang_code, video_metadata=Non
     else:
         max_rtl_font = max(24, min(34, round(height * 0.030)))
         default_font = min(28, max_rtl_font)
-    style["font_size"] = clamp_int(style.get("font_size"), 18, max_rtl_font, default_font)
+    style["font_size"] = clamp_int(
+        style.get("font_size"), 8 if manual_style else 18,
+        200 if manual_style else max_rtl_font, default_font,
+    )
     style["outline_width"] = clamp_int(style.get("outline_width"), 1, 3, 1)
     style["shadow"] = clamp_int(style.get("shadow"), 0, 2, 1)
     style["alignment"] = 2
@@ -6129,6 +6132,7 @@ def validate_visual_style(
     video_metadata=None,
     tiktok_style=False,
     allow_position_change=False,
+    manual_style=False,
 ):
     base = dict(base_style or {})
     style = dict(base)
@@ -6145,8 +6149,8 @@ def validate_visual_style(
     scaled_font_size = round(bounds["min_font"] + (bounds["max_font"] - bounds["min_font"]) * scale_fraction)
     style["font_size"] = clamp_int(
         raw_style.get("font_size") if "font_size" in raw_style else scaled_font_size,
-        bounds["min_font"],
-        bounds["max_font"],
+        8 if manual_style and "font_size" in raw_style else bounds["min_font"],
+        200 if manual_style and "font_size" in raw_style else bounds["max_font"],
         clamp_int(base.get("font_size"), bounds["min_font"], bounds["max_font"], bounds["min_font"]),
     )
     style["font_scale"] = font_scale
@@ -6289,16 +6293,17 @@ def select_subtitle_preview_segments(srt_path, max_samples=2):
     return chosen
 
 
-def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata=None, lang_code=None):
+def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata=None, lang_code=None, manual_style=False):
     metadata = video_metadata or {}
     original_size = f"{int(metadata.get('width') or 1920)}x{int(metadata.get('height') or 1080)}"
-    style_config = apply_script_safe_subtitle_style(style_config, lang_code, metadata)
+    style_config = apply_script_safe_subtitle_style(style_config, lang_code, metadata, manual_style=manual_style)
     style_config = validate_visual_style(
         style_config,
         style_config,
         metadata,
         tiktok_style=bool((style_config or {}).get("tiktok_style", False)),
         allow_position_change=False,
+        manual_style=manual_style,
     )
     font_name = style_config.get("font_name", "Arial")
     font_size = style_config.get("font_size", 20)
@@ -9983,7 +9988,7 @@ def write_srt(segments, srt_path):
 # -----------------------------
 # Step 5: Burn subtitles
 # -----------------------------
-def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_config=None):
+def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_config=None, manual_style=False):
     video_path_obj = Path(video_path).resolve()
     srt_path_obj = Path(srt_path).resolve()
     output_path_obj = Path(output_path).resolve()
@@ -10010,17 +10015,18 @@ def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_conf
     # Use custom style config if provided, otherwise use defaults
     if style_config:
         requested_style = dict(style_config)
-        style_config = apply_script_safe_subtitle_style(requested_style, lang_code, video_metadata)
+        style_config = apply_script_safe_subtitle_style(requested_style, lang_code, video_metadata, manual_style=manual_style)
         style_config = validate_visual_style(
             style_config,
             requested_style,
             video_metadata,
             tiktok_style=bool(style_config.get("tiktok_style", False)),
             allow_position_change=False,
+            manual_style=manual_style,
         )
         print(f"Manual subtitle style requested: {json.dumps(requested_style, ensure_ascii=False, sort_keys=True)}")
         print(f"Effective FFmpeg subtitle style: {json.dumps(style_config, ensure_ascii=False, sort_keys=True)}")
-        vf_arg = subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata, lang_code=lang_code)
+        vf_arg = subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata, lang_code=lang_code, manual_style=manual_style)
     else:
         # Default styles based on language
         fonts_dir = escape_ffmpeg_filter_path(bundled_subtitle_fonts_dir())
@@ -10292,6 +10298,7 @@ def main(
                 str(output_path),
                 lang_code=burn_lang_code,
                 style_config=effective_style_config,
+                manual_style=style_config is not None,
             )
             if rendered_style_config:
                 effective_style_config = rendered_style_config
@@ -12631,6 +12638,7 @@ def main(
             if output_path.exists() and not force:
                 print(f"Existing output video found. Skipping burn: {output_path}")
             else:
+                manual_style = style_config is not None
                 style_config, visual_style_report = resolve_visual_style_for_video(
                     str(video_path_obj),
                     output_root,
@@ -12645,6 +12653,7 @@ def main(
                     str(output_path),
                     lang_code=srt_lang_code,
                     style_config=style_config,
+                    manual_style=manual_style,
                 )
         
         if video_hash and not preparation_only:
