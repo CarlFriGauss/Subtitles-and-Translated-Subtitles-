@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$TrackedChangesBeforeBuild = @(& git -C $Root status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect the source worktree before packaging."
+}
 $Desktop = Join-Path $Root "desktop"
 $Resources = Join-Path $Desktop "src-tauri\resources"
 $BackendResources = Join-Path $Resources "backend"
@@ -176,13 +180,24 @@ $InstallerHash = (Get-FileHash -LiteralPath $Installer.FullName -Algorithm SHA25
 $SourceCommit = (& git -C $Root rev-parse HEAD).Trim()
 $SourceRemote = (& git -C $Root remote get-url origin).Trim()
 $TrackedChanges = @(& git -C $Root status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect the source worktree after packaging."
+}
+if ($TrackedChanges.Count -gt 0) {
+    Write-Host "Tracked files changed during or before packaging:"
+    $TrackedChanges | ForEach-Object { Write-Host $_ }
+    & git -C $Root --no-pager diff --no-ext-diff --no-color HEAD
+}
 $BuildManifest = [ordered]@{
     schema = "subgen_windows_installer_build_v1"
     product_version = $Version
     built_at_utc = [DateTime]::UtcNow.ToString("o")
     source_commit = $SourceCommit
     source_remote = $SourceRemote
+    source_tracked_worktree_clean_before_build = ($TrackedChangesBeforeBuild.Count -eq 0)
+    source_tracked_changes_before_build = $TrackedChangesBeforeBuild
     source_tracked_worktree_clean = ($TrackedChanges.Count -eq 0)
+    source_tracked_changes = $TrackedChanges
     dependency_install_skipped = [bool]$SkipDependencyInstall
     python = ((& $Python --version 2>&1) -join " ").Trim()
     pyinstaller = ((& $Python -m PyInstaller --version 2>&1) -join " ").Trim()
