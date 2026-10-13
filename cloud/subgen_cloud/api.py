@@ -31,6 +31,7 @@ from .db import (
 )
 from .schemas import (
     ApproveRequest,
+    BurnRequest,
     CredentialUpdate,
     JobCreate,
     PartRequest,
@@ -43,6 +44,8 @@ from .schemas import (
 )
 from .security import CredentialCipher, TokenVerifier, install_auth_dependencies
 from .storage import LocalObjectStorage, create_storage
+from .subtitle_files import save_subtitle_artifacts
+from subgen_editor import validate_editor_segments
 from subgen_review import (
     approve_review,
     combined_review_cues,
@@ -478,10 +481,18 @@ def create_app(settings=None, session_factory=None, storage=None):
                 "review": review,
                 "issues": review.get("issues") or [],
                 "approval": review.get("approval"),
+                "style_config": job.style_config or {},
             }
 
     @app.put("/v1/jobs/{job_id}/review")
     def save_review(job_id: str, payload: ReviewUpdate, user=Depends(current_user)):
+        validation = validate_editor_segments(payload.segments)
+        if not validation["accept"]:
+            raise HTTPException(status_code=409, detail="; ".join(
+                f"Cue {item['index']}: {item['message']}" for item in validation["errors"]
+            ))
+        if payload.style_config is not None:
+            reject_embedded_secrets(payload.style_config)
         with session_factory.begin() as session:
             job = session.scalar(select(Job).where(Job.id == job_id, Job.user_id == user["id"]))
             editable_states = {
@@ -498,6 +509,13 @@ def create_app(settings=None, session_factory=None, storage=None):
                 review, payload.segments, actor=f"cloud_user:{user['id']}",
                 translation_confirmed=payload.translation_confirmed,
             )
+            review["editor_saved"] = True
+            try:
+                save_subtitle_artifacts(session, storage, job, review)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=f"Subtitle files could not be saved: {exc}") from exc
+            if payload.style_config is not None:
+                job.style_config = {**(job.style_config or {}), **payload.style_config}
             job.review_manifest = review
             job.review_segments = combined_review_cues(review)
             job.approved_draft_hash = None
@@ -662,7 +680,9 @@ def create_app(settings=None, session_factory=None, storage=None):
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             if payload.style_config is not None:
-                job.style_config = payload.style_config
+                reject_embedded_secrets(payload.style_config)
+                job.style_config = {**(job.style_config or {}), **payload.style_config}
+            save_subtitle_artifacts(session, storage, job, review)
             job.review_manifest = review
             job.review_segments = combined_review_cues(review)
             job.approved_draft_hash = review["approval"]["approved_draft_hash"]
@@ -674,7 +694,7 @@ def create_app(settings=None, session_factory=None, storage=None):
         return result
 
     @app.post("/v1/jobs/{job_id}/burn")
-    def burn_approved_job(job_id: str, user=Depends(current_user)):
+    def burn_approved_job(job_id: str, payload: BurnRequest | None = None, user=Depends(current_user)):
         """Queue a distinct burn operation for the exact approved review revision."""
         if not settings.processing_enabled:
             raise HTTPException(status_code=503, detail="Cloud processing is safely disabled by the deployment owner")
@@ -688,6 +708,9 @@ def create_app(settings=None, session_factory=None, storage=None):
                 raise HTTPException(status_code=409, detail="Approved subtitle hash is unavailable")
             if approval.get("approved_draft_hash") != job.approved_draft_hash:
                 raise HTTPException(status_code=409, detail="Stored approval hash does not match the review manifest")
+            if payload and payload.style_config is not None:
+                reject_embedded_secrets(payload.style_config)
+                job.style_config = {**(job.style_config or {}), **payload.style_config}
             job.status = JobStatus.BURN_QUEUED.value
             job.stage = "burn_queued"
             job.progress = 0

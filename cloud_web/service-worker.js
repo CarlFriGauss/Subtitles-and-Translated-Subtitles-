@@ -1,4 +1,4 @@
-const CACHE = 'subgen-cloud-v2';
+const CACHE = 'subgen-cloud-v0.4.4';
 const STATIC = ['/', '/styles.css', '/runtime-config.js', '/app.js', '/manifest.webmanifest', '/assets/app-icon.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(STATIC))));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))));

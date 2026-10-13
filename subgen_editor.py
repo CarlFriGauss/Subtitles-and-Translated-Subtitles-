@@ -1,14 +1,79 @@
 import array
+import math
+import re
 import subprocess
 import sys
+import uuid
+from pathlib import Path
 
 from subgen_utils import hidden_subprocess_kwargs
 
 
+def has_saved_editor_changes(review):
+    return bool(review and (review.get("editor_saved") or any(
+        cue.get("manually_edited") for field in ("source_draft", "translation_draft")
+        for cue in review.get(field) or []
+    )))
+
+
+def review_subtitle_files(review, base):
+    """Render both edited languages from the durable review, without providers."""
+    from subgen_review import normalize_cues, render_srt_bytes
+
+    if not base or Path(base).name != base or base in {".", ".."} or "\\" in base:
+        raise ValueError("Invalid subtitle filename")
+    source_language = review.get("source_language") or "source"
+    target_language = review.get("target_language")
+    languages = [(source_language, normalize_cues(review.get("source_draft")))]
+    if target_language and target_language != source_language:
+        translated = normalize_cues(review.get("translation_draft"))
+        if len(translated) != len(languages[0][1]):
+            raise ValueError("Source and translation cue counts differ")
+        languages.append((target_language, translated))
+    files = {}
+    for language, cues in languages:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", language):
+            raise ValueError("Invalid subtitle language")
+        if not cues or not validate_editor_segments(cues)["accept"]:
+            raise ValueError("Resolve subtitle timing errors before saving subtitle files")
+        files[f"{base}.{language}.srt"] = render_srt_bytes(cues)
+        files[f"{base}.{language}.txt"] = ("\n".join(cue["text"] for cue in cues) + "\n").encode("utf-8")
+    files[f"{base}.api_transcript.txt"] = files[f"{base}.{source_language}.txt"]
+    return files
+
+
+def export_review_subtitles(review, directory, base):
+    files = review_subtitle_files(review, base)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    staged = []
+    try:
+        for name, content in files.items():
+            destination = directory / name
+            temporary = directory / f".{name}.{uuid.uuid4().hex}.tmp"
+            staged.append((temporary, destination))
+            temporary.write_bytes(content)
+        for temporary, destination in staged:
+            temporary.replace(destination)
+    finally:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
+    language = review.get("target_language") or review.get("source_language") or "source"
+    return directory / f"{base}.{language}.srt"
+
+
 def srt_time_to_seconds(value):
     if isinstance(value, (int, float)):
-        return float(value)
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("Timestamp must be finite")
+        return result
     text = str(value or "").strip().replace(".", ",")
+    if ":" not in text:
+        result = float(text.replace(",", "."))
+        if not math.isfinite(result):
+            raise ValueError("Timestamp must be finite")
+        return result
     parts = text.split(":")
     if len(parts) != 3:
         raise ValueError(f"Invalid SRT timestamp: {value}")

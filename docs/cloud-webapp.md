@@ -2,6 +2,8 @@
 
 This branch adds an independent multi-user web application without changing the desktop pipeline. The same account can sign in on a computer, iPhone, iPad, or Android device and see the same settings, uploaded-video history, review drafts, jobs, and artifacts.
 
+In the review screen, edit the source and translation, then click **Save subtitles**. Download links serve the edited source and translation TXT/SRT files. Save and approve the final draft before burning. The font, size, color, outline, and position selected immediately before **Burn approved draft** are used for that render, including changes made after approval. Text or timing edits require another save and approval.
+
 ## Services And Cost Boundary
 
 Vercel and Supabase are different, complementary services:
@@ -44,7 +46,7 @@ Provider API keys are encrypted with AES-256-GCM. The encryption master key belo
 
 Supabase asymmetric access tokens are verified against its JWKS endpoint. Legacy `HS256` sessions are verified through Supabase Auth's `/user` endpoint; the shared JWT secret is not copied into SubGen.
 
-## Local Verification
+## Run the service locally
 
 ```powershell
 pip install -e ".[cloud]"

@@ -92,8 +92,16 @@
         <div id="review-panel" class="panel review-panel" hidden>
           <div class="panel-heading"><div><p class="eyebrow">REVIEW & EDIT</p><h3>Source and translation cues</h3></div><button id="close-review" class="secondary">Close</button></div>
           <div id="review-issues" class="review-issues"></div>
+          <fieldset class="review-style"><legend>Subtitle style for burning</legend>
+            <label>Font<input id="review-font" value="Arial" maxlength="100"></label>
+            <label>Size<input id="review-size" type="number" value="28" min="8" max="200"></label>
+            <label>Text color<input id="review-color" type="color" value="#ffffff"></label>
+            <label>Outline width<input id="review-outline" type="number" value="1.5" min="0" max="12" step="0.5"></label>
+            <label>Position<select id="review-alignment"><option value="1">Bottom left</option><option value="2" selected>Bottom center</option><option value="3">Bottom right</option><option value="8">Top center</option></select></label>
+          </fieldset>
+          <div id="review-downloads" class="artifact-links"></div>
           <div id="review-list" class="review-list"></div>
-          <div class="review-actions"><span id="review-message" class="message"></span><button id="retranslate-button" class="secondary">Retranslate selected</button><button id="save-review-button" class="secondary">Save draft</button><button id="approve-button" class="primary">Approve exact draft</button><button id="burn-button" class="primary" hidden>Burn approved draft</button></div>
+          <div class="review-actions"><span id="review-message" class="message"></span><button id="retranslate-button" class="secondary">Retranslate selected</button><button id="save-review-button" class="secondary">Save subtitles</button><button id="approve-button" class="primary">Approve exact draft</button><button id="burn-button" class="primary" hidden>Burn approved draft</button></div>
         </div>
       </section>
 

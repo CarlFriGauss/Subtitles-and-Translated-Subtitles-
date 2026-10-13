@@ -89,7 +89,7 @@ from subgen_drive import (
     safe_file_name as safe_drive_file_name,
     safe_folder_name as safe_drive_name,
 )
-from subgen_editor import build_waveform_peaks, validate_editor_segments
+from subgen_editor import build_waveform_peaks, validate_editor_segments, export_review_subtitles
 from subgen_planner import build_pipeline_plan, public_model_catalog
 from subgen_mobile import (
     ACCESS_COOKIE_NAME,
@@ -923,7 +923,7 @@ def update_review_from_editor(review, segments, *, actor="human", translation_co
     return review
 
 
-def persist_active_review(review, video_path=None):
+def persist_active_review(review, video_path=None, *, export_subtitles=False):
     save_review_manifest(review)
     candidate = None
     with state_lock:
@@ -937,6 +937,30 @@ def persist_active_review(review, video_path=None):
         server_state["issues"] = review.get("issues") or []
         server_state["approval"] = review.get("approval")
         server_state["segments"] = review_to_editor_segments(review)
+    if export_subtitles:
+        source = Path(video_path or (review.get("source_location") or {}).get("path") or "")
+        base = source.stem or review["video_id"]
+        durable = DATA_DIR / "saved_subtitles" / review["source_hash"] / (review.get("target_language") or "source")
+        export_review_subtitles(review, durable, base)
+        save_review(durable / f"{base}.review.json", review)
+        destinations = {source.resolve().parent} if source.is_file() else set()
+        if final_srt:
+            destinations.add(Path(final_srt).resolve().parent)
+        if CONFIG.get("last_output_dir"):
+            destinations.add(Path(CONFIG["last_output_dir"]).resolve())
+        for directory in destinations:
+            export_review_subtitles(review, directory, base)
+            save_review(directory / f"{base}.review.json", review)
+        if final_srt:
+            # Format-specific output names must also refer to the edited draft.
+            from subgen_review import render_srt_bytes, selected_burn_cues
+            active_srt = Path(final_srt)
+            temporary = active_srt.with_name(f".{active_srt.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_bytes(render_srt_bytes(selected_burn_cues(review)))
+                temporary.replace(active_srt)
+            finally:
+                temporary.unlink(missing_ok=True)
     return candidate
 
 
@@ -2364,10 +2388,18 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             segments = data.get('segments') or []
             report = validate_editor_segments(segments)
             if path == '/api/editor/draft':
+                if not report["accept"]:
+                    self.send_json(report, 409)
+                    return
                 video_hash = data.get('video_hash')
                 target_language = data.get('target_language') or 'source'
                 if not video_hash:
                     self.send_error(400, "Missing video_hash")
+                    return
+                with state_lock:
+                    active_hash = server_state.get("video_hash")
+                if active_hash and active_hash != video_hash:
+                    self.send_json({"error": "The active video changed. Reopen its review before saving."}, 409)
                     return
                 review = get_review_manifest(video_hash, target_language)
                 if not review:
@@ -2379,7 +2411,12 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                     actor="local_editor",
                     translation_confirmed=bool(data.get("translation_confirmed", False)),
                 )
-                persist_active_review(review, video_path=server_state.get("video_path"))
+                review["editor_saved"] = True
+                try:
+                    persist_active_review(review, video_path=server_state.get("video_path"), export_subtitles=True)
+                except (OSError, ValueError) as exc:
+                    self.send_json({"error": f"Review retained, but subtitle file export failed: {exc}"}, 409)
+                    return
                 save_subtitle_draft(video_hash, target_language, segments, approved=False)
                 report["review"] = {
                     "state": review.get("state"),
@@ -2466,6 +2503,11 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             content_length = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(content_length).decode('utf-8'))
             video_hash = data.get("video_hash") or server_state.get("video_hash")
+            with state_lock:
+                active_hash = server_state.get("video_hash")
+            if active_hash and active_hash != video_hash:
+                self.send_json({"error": "The active video changed. Reopen its review before approval."}, 409)
+                return
             target_language = data.get("target_language") or server_state.get("target_lang") or "source"
             review = get_review_manifest(video_hash, target_language) if video_hash else None
             if not review:
@@ -2488,8 +2530,9 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                     actor="local_editor",
                     accept_warnings=bool(data.get("accept_warnings", False)),
                 )
-                review_path = persist_active_review(review, video_path=server_state.get("video_path"))
-            except ValueError as exc:
+                review["editor_saved"] = True
+                review_path = persist_active_review(review, video_path=server_state.get("video_path"), export_subtitles=True)
+            except (OSError, ValueError) as exc:
                 self.send_json({"error": str(exc), "issues": review.get("issues") or []}, 409)
                 return
             self.send_json({

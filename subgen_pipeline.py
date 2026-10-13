@@ -62,6 +62,7 @@ from subgen_db import (
     get_burned_style,
     save_burned_style,
     save_review_manifest,
+    get_review_manifest,
     normalize_source_location,
     register_media_source,
 )
@@ -10161,6 +10162,30 @@ def main(
     output_root = Path(output_dir).resolve() if output_dir else video_path_obj.parent
     output_root.mkdir(parents=True, exist_ok=True)
     approved_review = load_review(approved_review_path) if approved_review_path else None
+
+    # A style-only preparation must preserve explicit human corrections.
+    # Full regeneration and a different source language still use the original pipeline.
+    if (
+        not srt_path_arg and video_hash and cache_action in {"reuse_all", "reburn"}
+        and (no_burn or pipeline_config.get("review_before_burn", True))
+    ):
+        saved_review = get_review_manifest(video_hash, target_language or "source")
+        from subgen_editor import export_review_subtitles, has_saved_editor_changes
+        if (
+            has_saved_editor_changes(saved_review)
+            and saved_review.get("source_hash") == content_sha256
+            and pipeline_config.get("source_language") in {
+                None, "", "auto", saved_review.get("source_language")
+            }
+        ):
+            saved_review["source_location"] = resolved_source_location
+            saved_review["state"] = "IN_REVIEW"
+            saved_review["approval"] = None
+            saved_srt = export_review_subtitles(saved_review, output_root, base)
+            save_review(output_root / f"{base}.review.json", saved_review)
+            save_review_manifest(saved_review)
+            print("[EDITOR] Reusing saved manual corrections for this exact video and language. Approve before burning.")
+            return saved_srt
     
     # Load manifest data from SQLite database instead of manifest.json
     manifest = {
@@ -12654,7 +12679,7 @@ def main(
                     except Exception as e:
                         print(f"Warning: Could not delete directory {temp_dir.name}: {e}")
 
-        return output_path
+    return output_path
 
 
 if __name__ == "__main__":

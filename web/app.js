@@ -180,6 +180,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const editorSearch = document.getElementById('editor-search');
     const btnBurnFinal = document.getElementById('btn-burn-final');
     const btnApproveDraft = document.getElementById('btn-approve-draft');
+    const btnSaveSubtitles = document.getElementById('btn-save-subtitles');
     const editorIssueFilter = document.getElementById('editor-issue-filter');
     const navEditor = document.getElementById('nav-editor');
     const navExport = document.getElementById('nav-export');
@@ -1400,6 +1401,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     let editorAutosaveTimer = null;
+    let editorSaveQueue = Promise.resolve();
 
     function cloneSegments() {
         return JSON.parse(JSON.stringify(state.segments));
@@ -1853,40 +1855,49 @@ document.addEventListener('DOMContentLoaded', () => {
         editorSaveState.textContent = 'Unsaved';
         state.reviewApproval = null;
         clearTimeout(editorAutosaveTimer);
-        editorAutosaveTimer = setTimeout(saveEditorDraft, 700);
+        editorAutosaveTimer = setTimeout(() => saveEditorDraft().catch(() => {}), 700);
     }
 
-    async function saveEditorDraft() {
+    function saveEditorDraft() {
         if (!state.videoHash) return;
+        clearTimeout(editorAutosaveTimer);
+        const videoHash = state.videoHash;
+        const driveContext = state.driveReviewContext;
+        const snapshot = JSON.stringify(state.segments);
+        const payload = driveContext ? {
+            batch_id: driveContext.batchId, item_index: driveContext.itemIndex,
+            segments: JSON.parse(snapshot), translation_confirmed: true,
+        } : {
+            video_hash: videoHash, target_language: state.targetLanguage || 'source',
+            segments: JSON.parse(snapshot),
+        };
+        const save = editorSaveQueue.catch(() => {}).then(async () => {
         editorSaveState.textContent = 'Saving...';
         try {
-            const driveContext = state.driveReviewContext;
             const response = await fetch(driveContext ? '/api/drive/batch/item/save' : '/api/editor/draft', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(driveContext ? {
-                    batch_id: driveContext.batchId,
-                    item_index: driveContext.itemIndex,
-                    segments: state.segments,
-                    translation_confirmed: true,
-                } : {
-                    video_hash: state.videoHash,
-                    target_language: state.targetLanguage || 'source',
-                    segments: state.segments,
-                }),
+                body: JSON.stringify(payload),
             });
-            if (!response.ok) throw new Error('Draft save failed');
             const data = await readJsonResponse(response);
+            if (!response.ok || data.accept === false) throw new Error(data.error || 'Resolve timing errors before saving');
+            if (state.videoHash !== videoHash || JSON.stringify(state.segments) !== snapshot) return;
             if (data.review) {
                 state.reviewIssues = data.review.issues || [];
                 state.reviewApproval = data.review.approval || null;
                 state.reviewFieldState = data.review.field_state || {};
             }
-            editorSaveState.textContent = 'Saved';
+            editorSaveState.textContent = 'Saved to TXT / SRT';
         } catch (error) {
             editorSaveState.textContent = 'Save failed';
+            throw error;
         }
+        });
+        editorSaveQueue = save;
+        return save;
     }
+
+    btnSaveSubtitles.addEventListener('click', () => saveEditorDraft().catch(error => addLog(`[ERROR] ${error.message}`, 'error')));
 
     async function initializeEditor() {
         normalizeEditorSegments();
@@ -2209,6 +2220,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // ==========================================
     btnApproveDraft.addEventListener('click', async () => {
         if (!state.segments.length) return;
+        try { await saveEditorDraft(); }
+        catch (error) { addLog(`[ERROR] ${error.message}`, 'error'); return; }
         const { errors, warnings } = validateEditorSegments();
         if (errors.length) {
             renderEditor();

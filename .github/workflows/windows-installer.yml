@@ -31,16 +31,11 @@ jobs:
         shell: pwsh
         run: ./packaging/build-windows.ps1 -Python python
 
-      - name: Publish frozen WhisperX smoke-test report
-        uses: actions/upload-artifact@v4
-        with:
-          name: SubGen-WhisperX-Smoke-Test
-          path: build/whisperx-frozen-smoke.json
-          if-no-files-found: error
-
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: SubGen-Windows-Installer
-          path: desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.build.json
           if-no-files-found: error

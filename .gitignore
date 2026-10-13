@@ -20,6 +20,8 @@ google_drive_token.json
 drive_batches/
 uploads/
 failure_diagnostics/
+saved_subtitles/
+.tmp/
 jobs/
 .cursorrules
 .playwright-cli/
@@ -27,6 +29,11 @@ jobs/
 # Generated subtitle files
 *.wav
 *.srt
+*.review.json
+*.txt
+!**/requirements*.txt
+!**/*LICENSE*.txt
+!**/THIRD_PARTY_NOTICES.txt
 *.api_transcript.txt
 *.manifest.json
 *.segments.json

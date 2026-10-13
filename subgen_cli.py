@@ -26,12 +26,14 @@ from subgen_providers import (
     normalize_provider_id,
 )
 from subgen_db import get_review_manifest, list_review_manifests, save_review_manifest
+from subgen_editor import export_review_subtitles
 from subgen_review import (
     approve_review,
     assert_burn_allowed,
     load_review,
     render_srt_bytes,
     save_review,
+    update_review_from_combined,
 )
 
 
@@ -1579,6 +1581,24 @@ def run_review_inspect(args):
     print(json.dumps(review, ensure_ascii=False, indent=2))
 
 
+def run_review_save(args):
+    review, manifest_path = resolve_review_for_cli(args)
+    segments = json.loads(Path(args.segments).read_text(encoding="utf-8"))
+    update_review_from_combined(
+        review, segments, actor="cli_user",
+        translation_confirmed=bool(args.translation_confirmed),
+    )
+    review["editor_saved"] = True
+    output_root = Path(args.output_dir).resolve() if args.output_dir else manifest_path.parent
+    source_name = (review.get("source_location") or {}).get("name")
+    base = Path(source_name).stem if source_name else manifest_path.name.removesuffix(".review.json")
+    output = export_review_subtitles(review, output_root, base)
+    save_review(manifest_path, review)
+    save_review_manifest(review)
+    print(f"Edited TXT/SRT files saved: {output_root}")
+    print(f"Subtitle file: {output}")
+
+
 def run_review_approve(args):
     review, manifest_path = resolve_review_for_cli(args)
     approve_review(
@@ -1586,6 +1606,9 @@ def run_review_approve(args):
         actor=getattr(args, "actor", None) or "cli_user",
         accept_warnings=bool(getattr(args, "accept_warnings", False)),
     )
+    source_name = (review.get("source_location") or {}).get("name")
+    base = Path(source_name).stem if source_name else manifest_path.name.removesuffix(".review.json")
+    export_review_subtitles(review, manifest_path.parent, base)
     save_review(manifest_path, review)
     save_review_manifest(review)
     print(f"Approved draft hash: {review['approval']['approved_draft_hash']}")
@@ -1623,11 +1646,16 @@ def run_review_burn(args):
     approved_srt = output_root / f"{source_path.stem}.approved.{suffix}.srt"
     approved_srt.write_bytes(gate["subtitle_bytes"])
     save_review(manifest_path, review)
+    config = load_config()
+    style = get_style(config, review.get("target_language") or review.get("source_language"))
+    if args.style_json:
+        style.update(json.loads(Path(args.style_json).read_text(encoding="utf-8")))
     output = run_pipeline(
         str(source_path),
         srt_path_arg=str(approved_srt),
         target_language=review.get("target_language") or review.get("source_language"),
-        pipeline_config=load_config(),
+        pipeline_config=config,
+        style_config=style,
         force=bool(args.force),
         output_dir=str(output_root),
         approved_review_path=str(manifest_path),
@@ -1655,12 +1683,16 @@ def build_parser():
     review_actions = review_parser.add_subparsers(dest="review_action", required=True)
     review_list_parser = review_actions.add_parser("list", help="List prepared reviews and blocking issue counts.")
     review_list_parser.add_argument("--state", action="append", help="Filter by persistent review state.")
-    for action in ("inspect", "approve", "retranslate", "burn"):
+    for action in ("inspect", "save", "approve", "retranslate", "burn"):
         action_parser = review_actions.add_parser(action, help=f"{action.title()} one prepared review.")
         selector = action_parser.add_mutually_exclusive_group(required=True)
         selector.add_argument("--manifest", help="Path to the durable .review.json file.")
         selector.add_argument("--video-id", help="Prepared video ID in the local review database.")
         action_parser.add_argument("--target-language", help="Target language when selecting by video ID.")
+        if action == "save":
+            action_parser.add_argument("--segments", required=True, help="JSON array of edited source/translation cues.")
+            action_parser.add_argument("--output-dir", help="Destination for edited TXT/SRT files.")
+            action_parser.add_argument("--translation-confirmed", action="store_true", help="Confirm the translation matches the edited source.")
         if action == "approve":
             action_parser.add_argument("--accept-warnings", action="store_true", help="Explicitly accept unresolved warnings.")
             action_parser.add_argument("--actor", help="Approval identity recorded in history.")
@@ -1674,6 +1706,7 @@ def build_parser():
             action_parser.add_argument("--actor", help="Identity recorded in translation history.")
             action_parser.add_argument("--device", help="Translation device override.")
         if action == "burn":
+            action_parser.add_argument("--style-json", help="JSON file with style overrides read at burn time.")
             action_parser.add_argument("--video", help="Exact original source media when its recorded local path is unavailable.")
             action_parser.add_argument("--output-dir", help="Destination for approved SRT and rendered video.")
             action_parser.add_argument("--force", action="store_true", help="Re-render even if an output exists.")
@@ -1790,6 +1823,8 @@ def main(argv=None):
             run_review_list(args)
         elif args.review_action == "inspect":
             run_review_inspect(args)
+        elif args.review_action == "save":
+            run_review_save(args)
         elif args.review_action == "approve":
             run_review_approve(args)
         elif args.review_action == "retranslate":

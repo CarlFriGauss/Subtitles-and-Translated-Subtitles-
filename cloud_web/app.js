@@ -10,6 +10,8 @@ const state = {
   currentReviewJob: null,
   currentReviewStatus: null,
   currentReview: null,
+  reviewStyle: {},
+  reviewDirty: false,
   jobs: [],
   videos: [],
 };
@@ -257,6 +259,13 @@ async function openReview(jobId) {
   state.currentReviewJob = jobId;
   state.currentReviewStatus = review.status;
   state.currentReview = review.review;
+  state.reviewStyle = review.style_config || {};
+  state.reviewDirty = false;
+  $('#review-font').value = state.reviewStyle.font_name || 'Arial';
+  $('#review-size').value = state.reviewStyle.font_size || 28;
+  $('#review-color').value = state.reviewStyle.primary_color || '#ffffff';
+  $('#review-outline').value = state.reviewStyle.outline_width ?? 1.5;
+  $('#review-alignment').value = state.reviewStyle.alignment || 2;
   $('#review-list').innerHTML = review.segments.map((segment, index) => `
     <div class="cue" data-index="${index}" data-cue-id="${escapeHtml(segment.id || '')}">
       <span class="cue-index">${index + 1}</span>
@@ -281,10 +290,30 @@ async function openReview(jobId) {
   }));
   $$('.review-issue .issue-resolve').forEach(button => button.addEventListener('click', () => resolveCloudIssue(button.dataset.issueId, button.dataset.severity).catch(error => message($('#review-message'), error.message, 'error'))));
   $('#approve-button').hidden = review.status === 'approved';
-  $('#save-review-button').hidden = review.status === 'approved';
+  $('#save-review-button').hidden = false;
   $('#burn-button').hidden = review.status !== 'approved' && review.status !== 'burn_failed';
   $('#review-panel').hidden = false;
   $('#review-panel').scrollIntoView({behavior: 'smooth'});
+  await refreshSubtitleDownloads();
+}
+
+function collectReviewStyle() {
+  const size = Number($('#review-size').value);
+  const outline = Number($('#review-outline').value);
+  if (!$('#review-font').value.trim() || !Number.isFinite(size) || size < 8 || size > 200 || !Number.isFinite(outline) || outline < 0 || outline > 12) {
+    throw new Error('Choose a font, size from 8 to 200, and outline width from 0 to 12.');
+  }
+  return {...state.reviewStyle, font_name: $('#review-font').value.trim(), font_size: size,
+    primary_color: $('#review-color').value, outline_width: outline,
+    alignment: Number($('#review-alignment').value)};
+}
+
+async function refreshSubtitleDownloads() {
+  const job = await api(`/v1/jobs/${state.currentReviewJob}`);
+  $('#review-downloads').innerHTML = job.artifacts.filter(item => /^(source|target)_(srt|text)$/.test(item.kind)).map(item =>
+    `<button type="button" data-artifact-id="${escapeHtml(item.id)}" data-filename="subtitles.${escapeHtml(item.language || 'source')}.${item.kind.endsWith('srt') ? 'srt' : 'txt'}">Download ${item.kind.startsWith('source') ? 'source' : 'translation'} ${item.kind.endsWith('srt') ? 'SRT' : 'TXT'}</button>`
+  ).join('');
+  $$('#review-downloads button').forEach(button => button.addEventListener('click', () => downloadArtifact(button.dataset.artifactId, button.dataset.filename).catch(error => message($('#review-message'), error.message, 'error'))));
 }
 
 function collectReview() {
@@ -300,8 +329,13 @@ function collectReview() {
 
 async function saveReview() {
   const segments = collectReview();
-  await api(`/v1/jobs/${state.currentReviewJob}/review`, {method: 'PUT', body: JSON.stringify({segments, translation_confirmed: true})});
-  message($('#review-message'), 'Draft saved. Any previous approval was invalidated.', 'success');
+  const snapshot = JSON.stringify(segments);
+  await api(`/v1/jobs/${state.currentReviewJob}/review`, {method: 'PUT', body: JSON.stringify({segments, translation_confirmed: true, style_config: collectReviewStyle()})});
+  state.reviewDirty = JSON.stringify(collectReview()) !== snapshot;
+  $('#approve-button').hidden = false;
+  $('#burn-button').hidden = true;
+  message($('#review-message'), 'Saved to TXT / SRT. Approve this draft before burning.', 'success');
+  await refreshSubtitleDownloads();
 }
 
 async function retranslateSelected() {
@@ -316,14 +350,16 @@ async function retranslateSelected() {
 
 async function approveReview() {
   await saveReview();
-  await api(`/v1/jobs/${state.currentReviewJob}/approve`, {method: 'POST', body: JSON.stringify({translation_confirmed: true})});
+  if (state.reviewDirty) throw new Error('The subtitles changed while saving. Save and review the latest changes.');
+  await api(`/v1/jobs/${state.currentReviewJob}/approve`, {method: 'POST', body: JSON.stringify({translation_confirmed: true, style_config: collectReviewStyle()})});
   message($('#review-message'), 'Exact draft approved. Burn remains a separate action.', 'success');
   await openReview(state.currentReviewJob);
   await loadJobs();
 }
 
 async function burnApprovedReview() {
-  await api(`/v1/jobs/${state.currentReviewJob}/burn`, {method: 'POST', body: JSON.stringify({})});
+  if (state.reviewDirty) throw new Error('Save and approve your edited subtitles before burning.');
+  await api(`/v1/jobs/${state.currentReviewJob}/burn`, {method: 'POST', body: JSON.stringify({style_config: collectReviewStyle()})});
   message($('#review-message'), 'Approved draft queued for burn.', 'success');
   $('#review-panel').hidden = true;
   await loadJobs();
@@ -339,7 +375,7 @@ async function resolveCloudIssue(issueId, severity) {
   await openReview(state.currentReviewJob);
 }
 
-async function downloadArtifact(artifactId) {
+async function downloadArtifact(artifactId, filename = 'subgen-output') {
   const link = await api(`/v1/artifacts/${artifactId}/download`);
   const sameOrigin = new URL(link.url, location.href).origin === location.origin;
   if (!sameOrigin) { location.href = link.url; return; }
@@ -347,8 +383,16 @@ async function downloadArtifact(artifactId) {
   if (!response.ok) throw new Error('Download failed.');
   const blob = await response.blob();
   const anchor = document.createElement('a');
-  anchor.href = URL.createObjectURL(blob); anchor.download = 'subgen-output'; anchor.click();
+  anchor.href = URL.createObjectURL(blob); anchor.download = filename; anchor.click();
   setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+}
+
+async function runReviewAction(action) {
+  const buttons = $$('.review-actions button');
+  buttons.forEach(button => {button.disabled = true;});
+  try { await action(); }
+  catch (error) { message($('#review-message'), error.message, 'error'); }
+  finally { buttons.forEach(button => {button.disabled = false;}); }
 }
 
 async function bootstrap() {
@@ -372,10 +416,17 @@ $('#existing-video').addEventListener('change', () => {if($('#existing-video').v
 $('#job-form').addEventListener('submit', event => {event.preventDefault(); createJob().catch(error => {$('#start-button').disabled=false; message($('#create-message'), error.message, 'error');});});
 $('#refresh-jobs').addEventListener('click', () => loadJobs().catch(console.error));
 $('#close-review').addEventListener('click', () => {$('#review-panel').hidden=true;});
-$('#save-review-button').addEventListener('click', () => saveReview().catch(error => message($('#review-message'), error.message, 'error')));
-$('#retranslate-button').addEventListener('click', () => retranslateSelected().catch(error => message($('#review-message'), error.message, 'error')));
-$('#approve-button').addEventListener('click', () => approveReview().catch(error => message($('#review-message'), error.message, 'error')));
-$('#burn-button').addEventListener('click', () => burnApprovedReview().catch(error => message($('#review-message'), error.message, 'error')));
+$('#review-list').addEventListener('input', event => {
+  if (event.target.classList.contains('cue-select')) return;
+  state.reviewDirty = true;
+  $('#burn-button').hidden = true;
+  $('#approve-button').hidden = false;
+  message($('#review-message'), 'Unsaved changes. Save subtitles before approval.', '');
+});
+$('#save-review-button').addEventListener('click', () => runReviewAction(saveReview));
+$('#retranslate-button').addEventListener('click', () => runReviewAction(retranslateSelected));
+$('#approve-button').addEventListener('click', () => runReviewAction(approveReview));
+$('#burn-button').addEventListener('click', () => runReviewAction(burnApprovedReview));
 $('#credential-form').addEventListener('submit', event => {event.preventDefault(); saveCredential().catch(error => message($('#credential-message'), error.message, 'error'));});
 $('#pipeline-settings-form').addEventListener('submit', event => {event.preventDefault(); saveSettings().catch(error => message($('#settings-message'), error.message, 'error'));});
 window.addEventListener('online', () => $('#connection-state').textContent='Online');

@@ -212,8 +212,8 @@ Normal workflow:
 3. Choose source language or automatic detection, target language, providers, models, alignment mode, and subtitle options.
 4. Start processing and follow **Process & Logs**.
 5. Inspect and correct the complete result in **Review & Edit**.
-6. Approve the exact final draft.
-7. Start the separate burn stage only if a rendered video is required.
+6. Click **Save subtitles** and wait for **Saved to TXT / SRT**. Source and translation files in the output folder now contain your corrections. Local editions retain a copy under `saved_subtitles` in the private data directory.
+7. Approve the exact final draft. Adjust **Subtitle Style** before **Burn Approved** if needed; the style selected at burn time is used without rerunning transcription.
 8. Export the video and subtitle files.
 
 Keep the terminal open. Press `Ctrl+C` to stop the server. Do not expose the local development server directly to the internet.
@@ -256,8 +256,8 @@ Application data is stored under `%LOCALAPPDATA%\SubGen`. Treat that directory a
 2. Select the video and output/cache directory in **Upload & Config**.
 3. Choose languages, providers, models, timing, and subtitle settings.
 4. Monitor **Process & Logs**.
-5. Correct and approve the exact final draft in **Review & Edit**.
-6. Burn only the approved draft when needed.
+5. Correct both languages in **Review & Edit**, click **Save subtitles**, and approve the exact final draft.
+6. Choose the final subtitle style before burning. Burn only the approved draft when needed.
 7. Export the final video and subtitle files.
 
 The first local-model operation may download model files. API calls may incur provider charges. Keep the computer awake for long transcription or burn stages.

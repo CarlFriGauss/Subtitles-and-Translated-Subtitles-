@@ -14,6 +14,24 @@ The cloud PWA and the desktop phone-access feature are different products. Deskt
 
 For complete partner instructions, see [docs/PARTNER_GUIDE.md](docs/PARTNER_GUIDE.md).
 
+### Save corrections and choose the final style
+
+In **Review & Edit**, correct the source and translation, then click **Save subtitles**. Wait for **Saved to TXT / SRT**. The source and translation TXT/SRT files contain your corrections; local editions also retain a copy in the private data directory under `saved_subtitles`. Cloud review provides download buttons for the saved files.
+
+Click **Approve Draft**, then **Burn Approved**. You can change the subtitle font, size, or color before burning, including after approval. Burning uses the approved text and the style selected at burn time. Text or timing edits require saving and approval again. To restyle a reviewed video, burn its saved review rather than regenerate its transcription.
+
+Reopening the exact same video with **Reuse compatible work** or **Reburn** preserves saved manual corrections. A different video hash or language does not reuse that review. **Regenerate all** requests a fresh transcript. Approve the saved draft again before another burn.
+
+CLI users can save an edited cue array and then burn the approved review with current configuration or a style JSON file:
+
+```text
+SubGen review save --manifest "PATH_TO_REVIEW.review.json" --segments "EDITED_CUES.json" --output-dir "OUTPUT_FOLDER" --translation-confirmed
+SubGen review approve --manifest "PATH_TO_REVIEW.review.json" --accept-warnings
+SubGen review burn --manifest "PATH_TO_REVIEW.review.json" --video "ORIGINAL_VIDEO" --style-json "STYLE.json" --output-dir "OUTPUT_FOLDER"
+```
+
+The cue array contains `id`, `start`, `end`, `text` (source), and `translation` fields. `SubGen review inspect` shows the review and cue IDs. A style file can contain, for example, `{"font_size": 40, "primary_color": "#FFFF00"}`. Approve only after checking the corrected text and timing.
+
 ## 1. CLI or local browser app from source
 
 ### Requirements

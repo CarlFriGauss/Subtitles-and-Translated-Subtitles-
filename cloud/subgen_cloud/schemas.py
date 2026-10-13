@@ -51,6 +51,11 @@ class JobCreate(BaseModel):
 class ReviewUpdate(BaseModel):
     segments: list[dict[str, Any]] = Field(min_length=1, max_length=10000)
     translation_confirmed: bool = False
+    style_config: dict[str, Any] | None = None
+
+
+class BurnRequest(BaseModel):
+    style_config: dict[str, Any] | None = None
 
 
 class RetranslateRequest(BaseModel):
