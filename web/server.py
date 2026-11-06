@@ -1622,16 +1622,22 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
 
     def reject_untrusted_request(self, method):
         """Shared guard for every method. Returns True when a response was sent."""
-        if not self.request_host_is_allowed():
-            self.send_json({"error": "Unrecognized Host header."}, 403)
+        def reject(message, status):
+            if method == "POST":
+                # Windows resets a connection closed with unread request data,
+                # and the client would never see this response.
+                self.discard_small_request_body()
+            self.close_connection = True
+            self.send_json({"error": message}, status)
             return True
+
+        if not self.request_host_is_allowed():
+            return reject("Unrecognized Host header.", 403)
         if method == "POST":
             if not self.request_has_valid_origin():
-                self.send_json({"error": "Request origin does not match this SubGen server."}, 403)
-                return True
+                return reject("Request origin does not match this SubGen server.", 403)
             if not self.request_body_type_is_allowed():
-                self.send_json({"error": "Requests must use application/json."}, 415)
-                return True
+                return reject("Requests must use application/json.", 415)
         return False
 
     def remote_path_is_allowed(self, path):
