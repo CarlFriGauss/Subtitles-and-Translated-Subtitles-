@@ -31,6 +31,7 @@ align = [
     "whisperx>=3.3",
 ]
 desktop-build = ["pyinstaller>=6.10"]
+dev = ["pytest>=8", "ruff>=0.6"]
 cloud = [
     "boto3>=1.35",
     "cryptography>=43",
@@ -50,3 +51,7 @@ py-modules = ["subgen_acoustic", "subgen_cli", "subgen_db", "subgen_drive", "sub
 [tool.setuptools.packages.find]
 where = ["cloud"]
 include = ["subgen_cloud*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
