@@ -1419,6 +1419,11 @@ def repetition_anomaly_report(
         cursor = 0
         while cursor + unit_size * minimum_repetitions <= len(cues):
             unit = normalized[cursor:cursor + unit_size]
+            if not " ".join(unit).strip():
+                # Cues without letters or digits ("♪♪", "...") normalize to "",
+                # and SequenceMatcher("", "").ratio() is 1.0: not repeated speech.
+                cursor += 1
+                continue
             count = 1
             next_index = cursor + unit_size
             while next_index + unit_size <= len(cues):
