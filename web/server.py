@@ -10,6 +10,7 @@ import uuid
 import shutil
 import argparse
 import io
+import ipaddress
 import math
 import time
 from copy import deepcopy
@@ -1435,9 +1436,10 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
         # Serve files from the 'web' folder for static requests
         root = Path(__file__).resolve().parent
         
-        # If the path is an API call, don't modify it
+        # API paths are never files. Returning them unchanged let the stdlib
+        # static handler open e.g. "/api/../Users/x/.ssh/id_rsa" from the drive root.
         if path.startswith('/api'):
-            return path
+            return str(root / "__not_found__")
             
         # Strip query parameters
         path_clean = urllib.parse.unquote(path.split('?')[0])
@@ -1539,14 +1541,71 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             mobile_access["diagnostics_at"] = now
         return mobile_access["diagnostics"]
 
-    def request_has_valid_origin(self):
-        if self.client_is_local():
+    def request_host_is_allowed(self):
+        """Reject DNS-rebinding requests.
+
+        A rebinding page reaches 127.0.0.1 under the attacker's own hostname, which
+        the browser puts in the Host header. SubGen is only ever addressed by
+        "localhost" or an IP literal (the desktop shell and mobile pairing URLs both
+        use IP addresses), so any other hostname is refused.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
+        try:
+            hostname = urllib.parse.urlsplit(f"//{host}").hostname or ""
+        except ValueError:
+            return False
+        if hostname == "localhost":
             return True
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            return False
+
+    def request_has_valid_origin(self):
+        """Refuse cross-site requests, including ones from the local machine.
+
+        Loopback clients used to skip this check, so any website open in the
+        user's browser could POST to the local server (CSRF).
+        """
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            return False
         origin = self.headers.get("Origin")
         if not origin:
             return True
         parsed = urllib.parse.urlparse(origin)
         return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host")
+
+    def request_body_type_is_allowed(self):
+        """Require a non-simple Content-Type on POST bodies.
+
+        "text/plain" and form encodings can be sent cross-site without a CORS
+        preflight; application/json and application/octet-stream cannot.
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return False
+        if content_length <= 0:
+            return True
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        return content_type in {"application/json", "application/octet-stream"}
+
+    def reject_untrusted_request(self, method):
+        """Shared guard for every method. Returns True when a response was sent."""
+        if not self.request_host_is_allowed():
+            self.send_json({"error": "Unrecognized Host header."}, 403)
+            return True
+        if method == "POST":
+            if not self.request_has_valid_origin():
+                self.send_json({"error": "Request origin does not match this SubGen server."}, 403)
+                return True
+            if not self.request_body_type_is_allowed():
+                self.send_json({"error": "Requests must use application/json."}, 415)
+                return True
+        return False
 
     def remote_path_is_allowed(self, path):
         if self.client_is_local():
@@ -1576,10 +1635,30 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                 continue
         return False
 
+    def do_HEAD(self):
+        # The stdlib HEAD handler calls send_head() directly and would skip the
+        # authorization check in do_GET, leaking file existence/size/mtime.
+        if self.reject_untrusted_request("HEAD"):
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if not self.request_is_authorized():
+            self.reject_unauthorized(api_request=path.startswith('/api'))
+            return
+        if path.startswith('/api'):
+            self.send_response(405)
+            self.send_header("Allow", "GET, POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_HEAD()
+
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
+
+        if self.reject_untrusted_request("GET"):
+            return
 
         if path == '/pair' and mobile_access["enabled"]:
             self.send_pairing_page()
@@ -1973,6 +2052,11 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                 self.send_error(500, f"Waveform generation failed: {exc}")
             return
 
+        # Unknown API routes must never fall through to the static file handler.
+        if path.startswith('/api'):
+            self.send_json({"error": "Not found."}, 404)
+            return
+
         # Serve static files normally
         super().do_GET()
 
@@ -2021,6 +2105,9 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
 
+        if self.reject_untrusted_request("POST"):
+            return
+
         if path == '/api/mobile/pair':
             if not mobile_access["enabled"]:
                 self.send_json({"error": "Mobile access is disabled."}, 404)
@@ -2056,9 +2143,6 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
 
         if not self.request_is_authorized():
             self.reject_unauthorized(api_request=True)
-            return
-        if not self.request_has_valid_origin():
-            self.send_json({"error": "Request origin does not match this SubGen server."}, 403)
             return
 
         if path == '/api/mobile/rotate':
