@@ -99,6 +99,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const mobileAccessUnavailable = document.getElementById('mobile-access-unavailable');
     const mobileNetworkSelect = document.getElementById('mobile-network-select');
     const mobileNetworkLabel = document.getElementById('mobile-network-label');
+    const mobileSharingToggle = document.getElementById('mobile-sharing-enabled');
+    const mobileSharingOffNote = document.getElementById('mobile-sharing-off-note');
     const btnCopyMobileUrl = document.getElementById('btn-copy-mobile-url');
     const btnRefreshMobileAccess = document.getElementById('btn-refresh-mobile-access');
     const btnRepairMobileAccess = document.getElementById('btn-repair-mobile-access');
@@ -2083,8 +2085,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const response = await fetch('/api/mobile/access', { cache: 'no-store' });
         if (!response.ok) throw new Error('Mobile access settings are unavailable.');
         const data = await readJsonResponse(response);
-        state.mobileAccessUrls = data.urls || [];
+        const sharing = Boolean(data.sharing);
+        mobileSharingToggle.checked = sharing;
+        mobileSharingToggle.disabled = !data.enabled;
+        mobileSharingOffNote.hidden = sharing;
         renderLastMobileDevice(data.last_device);
+        if (!sharing) {
+            state.mobileAccessUrls = [];
+            mobileNetworkSelect.innerHTML = '';
+            mobileNetworkSelect.hidden = true;
+            mobileNetworkLabel.hidden = true;
+            mobileAccessUrl.value = '';
+            mobileAccessQr.hidden = true;
+            mobileAccessQr.removeAttribute('src');
+            mobileAccessUnavailable.hidden = true;
+            mobileAccessIssues.hidden = true;
+            mobileAccessIndicator.className = 'status-indicator';
+            mobileAccessState.textContent = 'Phone access is off';
+            return;
+        }
+        state.mobileAccessUrls = data.urls || [];
         mobileNetworkSelect.innerHTML = '';
         state.mobileAccessUrls.forEach((entry, index) => {
             const option = document.createElement('option');
@@ -2122,6 +2142,25 @@ document.addEventListener('DOMContentLoaded', () => {
         element.addEventListener('click', () => { mobileAccessModal.hidden = true; });
     });
     mobileNetworkSelect.addEventListener('change', renderMobileAccessSelection);
+    mobileSharingToggle.addEventListener('change', async () => {
+        const enabled = mobileSharingToggle.checked;
+        mobileSharingToggle.disabled = true;
+        try {
+            const response = await fetch('/api/mobile/sharing', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            });
+            const data = await readJsonResponse(response);
+            if (!response.ok) throw new Error(data.error || 'Could not change phone access.');
+            await loadMobileAccess();
+        } catch (error) {
+            mobileSharingToggle.checked = !enabled;
+            mobileAccessState.textContent = error.message;
+        } finally {
+            mobileSharingToggle.disabled = false;
+        }
+    });
     btnCopyMobileUrl.addEventListener('click', async () => {
         if (!mobileAccessUrl.value) return;
         await navigator.clipboard.writeText(mobileAccessUrl.value);

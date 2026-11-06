@@ -308,8 +308,32 @@ session_cleanup_lock = threading.Lock()
 pending_session_cleanup = set()
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MOBILE_SHARING_PATH = DATA_DIR / "mobile_access_sharing.json"
+
+
+def load_mobile_sharing_preference():
+    """Phone access is opt-in: off unless the user switched it on in Mobile Access."""
+    try:
+        return bool(json.loads(MOBILE_SHARING_PATH.read_text(encoding="utf-8")).get("enabled"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def save_mobile_sharing_preference(enabled):
+    MOBILE_SHARING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = MOBILE_SHARING_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
+    os.replace(temporary, MOBILE_SHARING_PATH)
+
+
+def remote_clients_allowed():
+    """True only when the server was started LAN-capable AND the user turned sharing on."""
+    return bool(mobile_access.get("enabled") and mobile_access.get("sharing"))
+
+
 mobile_access = {
     "enabled": False,
+    "sharing": False,
     "port": 8080,
     "token": None,
     "diagnostics": None,
@@ -1428,6 +1452,9 @@ def copy_results_to_output_dir(filename, job_dir=None, include_video=True):
 
 # Custom HTTP Request Handler
 class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
+    # Drop connections that stay idle; slow clients could otherwise hold threads forever.
+    timeout = 120
+
     def log_message(self, format, *args):
         # Suppress request logging to prevent terminal flooding from status polling
         pass
@@ -1461,7 +1488,7 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
     def request_is_authorized(self):
         if self.client_is_local():
             return True
-        if not mobile_access["enabled"]:
+        if not remote_clients_allowed():
             return False
         return token_matches(request_token(self.headers), mobile_access["token"])
 
@@ -1741,6 +1768,7 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             urls = self.mobile_urls() if mobile_access["enabled"] else []
             self.send_json({
                 "enabled": bool(mobile_access["enabled"]),
+                "sharing": bool(mobile_access.get("sharing")),
                 "urls": urls,
                 "token_suffix": mobile_access["token"][-6:] if mobile_access["token"] else None,
                 "diagnostics": self.mobile_status(),
@@ -1751,6 +1779,9 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         if path == '/api/mobile/qr':
             if not self.client_is_local():
                 self.send_json({"error": "QR access is available on this computer only."}, 403)
+                return
+            if not remote_clients_allowed():
+                self.send_json({"error": "Turn on phone access first."}, 409)
                 return
             urls = self.mobile_urls()
             if not urls:
@@ -2143,6 +2174,27 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
 
         if not self.request_is_authorized():
             self.reject_unauthorized(api_request=True)
+            return
+
+        if path == '/api/mobile/sharing':
+            if not self.client_is_local():
+                self.send_json({"error": "Only the desktop app can change phone access."}, 403)
+                return
+            if not mobile_access["enabled"]:
+                self.send_json({"error": "This SubGen server was started without network support."}, 409)
+                return
+            try:
+                content_length = min(int(self.headers.get('Content-Length', 0)), 4096)
+                data = json.loads(self.rfile.read(content_length).decode('utf-8') or "{}")
+                enabled = data.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled must be true or false")
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                self.send_json({"error": "Send {\"enabled\": true} or {\"enabled\": false}."}, 400)
+                return
+            mobile_access["sharing"] = enabled
+            save_mobile_sharing_preference(enabled)
+            self.send_json({"sharing": enabled})
             return
 
         if path == '/api/mobile/rotate':
@@ -2996,6 +3048,11 @@ class SubGenThreadingServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
     daemon_threads = True
 
+    def verify_request(self, request, client_address):
+        # While phone access is off, connections from other machines are closed
+        # before any HTTP parsing, even though the socket listens on all interfaces.
+        return is_loopback_address(client_address[0]) or remote_clients_allowed()
+
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(
@@ -3008,6 +3065,7 @@ class SubGenThreadingServer(socketserver.ThreadingTCPServer):
 
 def run_server(port=8080, host="127.0.0.1", open_browser=True, lan_access=False):
     mobile_access["enabled"] = bool(lan_access)
+    mobile_access["sharing"] = bool(lan_access) and load_mobile_sharing_preference()
     mobile_access["port"] = int(port)
     mobile_access["token"] = load_or_create_access_token(MOBILE_TOKEN_PATH) if lan_access else None
 

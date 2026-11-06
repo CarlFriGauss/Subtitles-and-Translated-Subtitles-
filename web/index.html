@@ -940,6 +940,11 @@
                         <span class="status-indicator online"></span>
                         <span id="mobile-access-state">Ready to pair</span>
                     </div>
+                    <label class="mobile-sharing-toggle" for="mobile-sharing-enabled">
+                        <input type="checkbox" id="mobile-sharing-enabled">
+                        <span>Allow phones on this network to connect</span>
+                    </label>
+                    <p class="mobile-access-note" id="mobile-sharing-off-note" hidden>Phone access is off. SubGen accepts connections from this computer only. Turn it on to show the pairing QR code.</p>
                     <div class="mobile-platform-picker" role="group" aria-label="Phone type">
                         <button type="button" class="mobile-platform-option active" data-mobile-platform="ios" aria-pressed="true">
                             <i data-lucide="tablet-smartphone"></i><span>iPhone / iPad</span>

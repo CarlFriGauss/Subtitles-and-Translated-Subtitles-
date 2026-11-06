@@ -150,3 +150,69 @@ def test_same_origin_json_post_passes_the_guards(local_server):
         body=b'{"segments": []}',
     )
     assert status not in (403, 415)
+
+
+# --- SEC-3 -----------------------------------------------------------------
+
+def test_phone_access_is_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MOBILE_SHARING_PATH", tmp_path / "sharing.json")
+    assert server.load_mobile_sharing_preference() is False
+
+
+def test_phone_access_preference_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MOBILE_SHARING_PATH", tmp_path / "sharing.json")
+    server.save_mobile_sharing_preference(True)
+    assert server.load_mobile_sharing_preference() is True
+    server.save_mobile_sharing_preference(False)
+    assert server.load_mobile_sharing_preference() is False
+
+
+def test_remote_connections_dropped_while_sharing_is_off(monkeypatch):
+    httpd = server.SubGenThreadingServer.__new__(server.SubGenThreadingServer)
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", False)
+    assert httpd.verify_request(None, ("192.168.1.50", 5000)) is False
+    assert httpd.verify_request(None, ("127.0.0.1", 5000)) is True
+    monkeypatch.setitem(server.mobile_access, "sharing", True)
+    assert httpd.verify_request(None, ("192.168.1.50", 5000)) is True
+
+
+def test_valid_token_is_refused_while_sharing_is_off(local_server, monkeypatch):
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", False)
+    monkeypatch.setitem(server.mobile_access, "token", "secret-token")
+    monkeypatch.setattr(server.SubGenRequestHandler, "client_is_local", lambda self: False)
+    status, _ = request(
+        local_server, "GET", "/api/session",
+        headers={"Cookie": f"{server.ACCESS_COOKIE_NAME}=secret-token"},
+    )
+    assert status == 401
+
+
+def test_sharing_endpoint_toggles_and_persists(local_server, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MOBILE_SHARING_PATH", tmp_path / "sharing.json")
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", False)
+    status, body = request(
+        local_server, "POST", "/api/mobile/sharing",
+        headers={"Content-Type": "application/json"}, body=b'{"enabled": true}',
+    )
+    assert status == 200 and json.loads(body) == {"sharing": True}
+    assert server.mobile_access["sharing"] is True
+    assert server.load_mobile_sharing_preference() is True
+
+
+def test_sharing_endpoint_rejects_non_boolean(local_server, monkeypatch):
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    status, _ = request(
+        local_server, "POST", "/api/mobile/sharing",
+        headers={"Content-Type": "application/json"}, body=b'{"enabled": "yes"}',
+    )
+    assert status == 400
+
+
+def test_qr_unavailable_while_sharing_is_off(local_server, monkeypatch):
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", False)
+    status, _ = request(local_server, "GET", "/api/mobile/qr")
+    assert status == 409
