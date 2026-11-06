@@ -80,7 +80,7 @@ BUILTIN_PROVIDERS = {
         "env_key": "ANTHROPIC_API_KEY",
         "transcription": False,
         "translation": True,
-        "translation_model": "claude-3-5-sonnet-latest",
+        "translation_model": "claude-sonnet-5-5",
         "base_url": "https://api.anthropic.com",
     },
     "xai": {
@@ -304,22 +304,76 @@ def call_google_translation(api_key, prompt, instructions, model):
     return parsed
 
 
+ANTHROPIC_DEFAULT_TRANSLATION_MODEL = "claude-sonnet-5-5"
+
+# Retired Anthropic model IDs that may still be stored in user configs. They
+# return 404 from the API, so they are mapped to the current Sonnet.
+RETIRED_ANTHROPIC_MODELS = {
+    "claude-3-5-sonnet-latest",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-sonnet-20240229",
+    "claude-3-opus-latest",
+    "claude-3-opus-20240229",
+}
+
+ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
+
+
+def current_anthropic_model(model):
+    model = str(model or "").strip()
+    if not model or model in RETIRED_ANTHROPIC_MODELS:
+        return ANTHROPIC_DEFAULT_TRANSLATION_MODEL
+    return model
+
+
+def build_anthropic_translation_request(provider, prompt, instructions, model):
+    """Return (url, payload, extra_headers) for a translation request.
+
+    Current Claude models reject non-default sampling parameters, so no
+    temperature is sent. Thinking is on by default and counts toward
+    max_tokens, hence the larger budget. On the first-party API the
+    server-side refusal fallback is enabled, so a safety decline is retried
+    on another model inside the same call instead of failing the batch.
+    """
+    base_url = (provider.get("base_url") or ANTHROPIC_API_BASE_URL).rstrip("/")
+    payload = {
+        "model": current_anthropic_model(model),
+        "max_tokens": 16000,
+        "system": instructions + "\nReturn valid JSON only using the requested translations structure.",
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {}
+    if base_url == ANTHROPIC_API_BASE_URL:
+        payload["fallbacks"] = "default"
+        headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
+    return f"{base_url}/v1/messages", payload, headers
+
+
+def anthropic_response_text(response):
+    """Text of a Messages API response, with clear errors for unusable stops."""
+    stop_reason = response.get("stop_reason")
+    if stop_reason == "refusal":
+        details = response.get("stop_details") or {}
+        category = details.get("category") or "unspecified"
+        raise RuntimeError(f"Anthropic declined this translation batch (refusal category: {category}).")
+    if stop_reason == "max_tokens":
+        raise RuntimeError("Anthropic stopped at max_tokens before finishing the translation JSON.")
+    return "".join(item.get("text", "") for item in response.get("content", []) if item.get("type") == "text")
+
+
 def call_anthropic_translation(provider, api_key, prompt, instructions, model):
+    url, payload, extra_headers = build_anthropic_translation_request(provider, prompt, instructions, model)
     response = post_json(
-        f"{provider.get('base_url', 'https://api.anthropic.com').rstrip('/')}/v1/messages",
-        {
-            "model": model,
-            "max_tokens": 8192,
-            "temperature": 0.1,
-            "system": instructions + "\nReturn valid JSON only using the requested translations structure.",
-            "messages": [{"role": "user", "content": prompt}],
-        },
+        url,
+        payload,
         {
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
+            **extra_headers,
         },
     )
-    text = "".join(item.get("text", "") for item in response.get("content", []) if item.get("type") == "text")
+    text = anthropic_response_text(response)
     parsed = parse_json_text(text)
     parsed["_usage"] = response.get("usage")
     return parsed
