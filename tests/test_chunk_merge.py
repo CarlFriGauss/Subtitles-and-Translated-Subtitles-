@@ -84,3 +84,15 @@ def test_word_granularity_path_unchanged():
     ]
     text, _, _ = merged_text(groups)
     assert text == "store"
+
+
+def test_context_speech_kept_when_next_chunk_returned_nothing():
+    # Chunk 3 is missing from the groups (it returned no segments), so the
+    # context speech chunk 2 returned past its end is the only copy.
+    groups = [
+        group(1, 0, 180, (0.0, 5.0, "intro")),
+        group(2, 172, 360, (180.5, 185.0, "middle part"), (361.0, 365.0, "only copy")),
+        group(4, 532, 720, (541.0, 545.0, "later")),
+    ]
+    text, _, _ = merged_text(groups)
+    assert "only copy" in text

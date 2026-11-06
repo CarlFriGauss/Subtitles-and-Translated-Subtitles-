@@ -69,3 +69,9 @@ def test_call_sends_built_request(monkeypatch):
     assert captured["payload"]["model"] == providers.ANTHROPIC_DEFAULT_TRANSLATION_MODEL
     assert captured["headers"]["x-api-key"] == "sk-test-000"
     assert "temperature" not in captured["payload"]
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-haiku-5-5", "claude-sonnet-4-6"])
+def test_fallbacks_only_for_models_that_support_them(model):
+    _, payload, headers = providers.build_anthropic_translation_request(PROVIDER, "p", "i", model)
+    assert "fallbacks" not in payload and "anthropic-beta" not in headers

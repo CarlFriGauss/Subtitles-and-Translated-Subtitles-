@@ -1537,7 +1537,7 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_pairing_page(self):
         body = b"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer"><title>Pair with SubGen</title><style>
+<meta name="referrer" content="same-origin"><title>Pair with SubGen</title><style>
 body{font-family:system-ui;background:#070a13;color:#f8fafc;display:grid;place-items:center;min-height:100vh;margin:0}
 main{width:min(28rem,calc(100% - 2rem));text-align:center}p{color:#94a3b8;line-height:1.6}.state{color:#22d3ee}
 </style></head><body><main><h1>Connecting to SubGen</h1><p class="state" id="state">Verifying this device...</p></main>
@@ -1549,7 +1549,11 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        # Not "no-referrer": under that policy browsers send "Origin: null" on
+        # POST, which the CSRF check rejects. The token lives in the URL
+        # fragment, which is never part of a Referer, and is removed with
+        # history.replaceState before the pairing request.
+        self.send_header("Referrer-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(body)
 

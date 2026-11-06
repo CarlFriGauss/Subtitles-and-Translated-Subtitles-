@@ -81,7 +81,7 @@ def provider_quota_is_non_retryable(error_body):
             metric = str(violation.get("quotaMetric") or "").casefold()
             if "perday" in quota_id or "per_day" in quota_id or "requests_per_day" in metric:
                 return True
-    return False
+    return "current quota" in str(error.get("message") or "").casefold() and "per day" in str(error)
 
 
 def retry_after_seconds(headers):
@@ -135,7 +135,15 @@ def post_for_json(
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            retryable = exc.code in RETRYABLE_STATUS and not provider_quota_is_non_retryable(error_body)
+            quota_exhausted = provider_quota_is_non_retryable(error_body)
+            if quota_exhausted:
+                # subgen_longform matches this phrase to stop gap recovery early.
+                raise ProviderHTTPError(
+                    f"{label} failed with non-retryable daily quota: HTTP {exc.code}: {error_body}",
+                    exc.code,
+                    error_body,
+                ) from exc
+            retryable = exc.code in RETRYABLE_STATUS
             if retryable and not last_attempt:
                 delay = retry_after_seconds(exc.headers)
                 if delay is None:

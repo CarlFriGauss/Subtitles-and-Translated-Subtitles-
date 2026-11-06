@@ -7539,8 +7539,11 @@ def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
             duplicate_cutoff += max(0.0, float(overlap_seconds or 0.0))
         # A chunk re-transcribed with extra context audio can return speech past
         # its own end; the next chunk transcribes that audio itself.
-        has_later_group = group_position + 1 < len(groups)
-        group_end = float(group.get("end")) if has_later_group and group.get("end") is not None else None
+        # Only when the directly following chunk produced segments: chunks that
+        # returned nothing are not in this list, and their audio would be lost.
+        next_group = groups[group_position + 1] if group_position + 1 < len(groups) else None
+        next_is_adjacent = bool(next_group) and int(next_group.get("index") or 0) == chunk_index + 1
+        group_end = float(group.get("end")) if next_is_adjacent and group.get("end") is not None else None
 
         kept = []
         skipped = []

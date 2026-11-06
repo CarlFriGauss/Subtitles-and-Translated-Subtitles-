@@ -259,6 +259,14 @@ RETIRED_ANTHROPIC_MODELS = {
 
 ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 
+# Models documented to accept fallbacks: "default" on the first-party API.
+ANTHROPIC_DEFAULT_FALLBACK_MODELS = {
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-fable-5-1",
+}
+
 
 def current_anthropic_model(model):
     model = str(model or "").strip()
@@ -284,7 +292,7 @@ def build_anthropic_translation_request(provider, prompt, instructions, model):
         "messages": [{"role": "user", "content": prompt}],
     }
     headers = {}
-    if base_url == ANTHROPIC_API_BASE_URL:
+    if base_url == ANTHROPIC_API_BASE_URL and payload["model"] in ANTHROPIC_DEFAULT_FALLBACK_MODELS:
         payload["fallbacks"] = "default"
         headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
     return f"{base_url}/v1/messages", payload, headers

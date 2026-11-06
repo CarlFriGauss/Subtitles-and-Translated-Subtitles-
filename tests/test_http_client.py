@@ -119,3 +119,22 @@ def test_openai_audio_upload_now_retries(monkeypatch, scripted):
     monkeypatch.setattr(subgen_http, "backoff_delay", lambda attempt, base=2.0: 0)
     scripted["outcomes"] = [http_error(429), {"text": "hi"}]
     assert subgen_pipeline.post_openai_multipart("https://x", {"model": "m"}, {}) == {"text": "hi"}
+
+
+def test_daily_quota_error_is_marked_for_longform(scripted):
+    """subgen_longform stops gap recovery when it sees this phrase."""
+    body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED", "details": [
+        {"violations": [{"quotaId": "GenerateRequestsPerDayPerProject"}]}]}}).encode()
+    scripted["outcomes"] = [http_error(429, body)]
+    with pytest.raises(subgen_http.ProviderHTTPError) as excinfo:
+        post(scripted)
+    assert "non-retryable daily quota" in str(excinfo.value).casefold()
+
+
+def test_daily_quota_detected_from_message_alone(scripted):
+    body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED",
+                                 "message": "You exceeded your current quota: 250 requests per day"}}).encode()
+    scripted["outcomes"] = [http_error(429, body)]
+    with pytest.raises(subgen_http.ProviderHTTPError):
+        post(scripted)
+    assert scripted["calls"] == 1

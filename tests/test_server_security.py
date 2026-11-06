@@ -216,3 +216,32 @@ def test_qr_unavailable_while_sharing_is_off(local_server, monkeypatch):
     monkeypatch.setitem(server.mobile_access, "sharing", False)
     status, _ = request(local_server, "GET", "/api/mobile/qr")
     assert status == 409
+
+
+def test_pairing_page_does_not_use_no_referrer(local_server, monkeypatch):
+    """Under 'no-referrer' browsers send Origin: null on POST, which the
+    CSRF check rejects, so phone pairing would always fail."""
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", True)
+    monkeypatch.setitem(server.mobile_access, "token", "secret-token")
+    conn = http.client.HTTPConnection("127.0.0.1", local_server, timeout=10)
+    conn.request("GET", "/pair")
+    response = conn.getresponse()
+    body = response.read()
+    conn.close()
+    assert response.status == 200
+    assert response.getheader("Referrer-Policy") == "same-origin"
+    assert b"no-referrer" not in body
+
+
+def test_pairing_post_from_same_origin_succeeds(local_server, monkeypatch):
+    monkeypatch.setitem(server.mobile_access, "enabled", True)
+    monkeypatch.setitem(server.mobile_access, "sharing", True)
+    monkeypatch.setitem(server.mobile_access, "token", "secret-token")
+    status, _ = request(
+        local_server, "POST", "/api/mobile/pair",
+        headers={"Origin": f"http://127.0.0.1:{local_server}", "Content-Type": "application/json",
+                 "Sec-Fetch-Site": "same-origin"},
+        body=b'{"token": "secret-token"}',
+    )
+    assert status == 200

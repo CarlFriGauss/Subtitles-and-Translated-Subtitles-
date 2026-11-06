@@ -8,8 +8,15 @@ subgen_version.py is the source of truth. Run from the repository root:
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        raise SystemExit("check_versions.py needs Python 3.11+ or the 'tomli' package.")
 
 ROOT = Path(__file__).resolve().parent.parent
 

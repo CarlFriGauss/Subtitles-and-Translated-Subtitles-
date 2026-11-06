@@ -31,7 +31,7 @@ align = [
     "whisperx>=3.3",
 ]
 desktop-build = ["pyinstaller>=6.10"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "tomli>=2; python_version < '3.11'"]
 cloud = [
     "boto3>=1.35",
     "cryptography>=43",

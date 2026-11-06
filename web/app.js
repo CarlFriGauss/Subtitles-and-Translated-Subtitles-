@@ -1895,11 +1895,6 @@ document.addEventListener('DOMContentLoaded', () => {
         // Always return a Promise: callers chain .catch() on the result.
         if (!state.videoHash) return Promise.resolve();
         clearTimeout(editorAutosaveTimer);
-        if (!state.segments.length) {
-            // Never overwrite a saved review with an empty list (e.g. a pending
-            // autosave firing after Restart cleared the editor).
-            return Promise.reject(new Error('There are no subtitles to save.'));
-        }
         const videoHash = state.videoHash;
         const driveContext = state.driveReviewContext;
         const snapshot = JSON.stringify(state.segments);
@@ -2126,6 +2121,9 @@ document.addEventListener('DOMContentLoaded', () => {
         mobileSharingToggle.checked = sharing;
         mobileSharingToggle.disabled = !data.enabled;
         mobileSharingOffNote.hidden = sharing;
+        mobileSharingOffNote.textContent = data.enabled
+            ? 'Phone access is off. SubGen accepts connections from this computer only. Turn it on to show the pairing QR code.'
+            : 'This SubGen server was started without network support (no --lan), so phones cannot connect.';
         renderLastMobileDevice(data.last_device);
         if (!sharing) {
             state.mobileAccessUrls = [];
