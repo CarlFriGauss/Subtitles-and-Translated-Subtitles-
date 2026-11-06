@@ -18,3 +18,27 @@ os.environ["SUBGEN_DATA_DIR"] = str(TEST_DATA_DIR)
 for extra in (ROOT, ROOT / "web", ROOT / "cloud"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
+
+
+import pytest  # noqa: E402
+
+_PROVIDER_KEY_SUFFIXES = ("_API_KEY", "_API_KEY_WORK")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environment():
+    """Run every test without real provider keys and undo any os.environ edits.
+
+    Tests must never reach a paid API with a developer's real key, and code
+    under test (e.g. load_api_keys) writes os.environ directly, which
+    monkeypatch cannot undo.
+    """
+    saved = dict(os.environ)
+    for key in list(os.environ):
+        if key.upper().endswith(_PROVIDER_KEY_SUFFIXES) or key.upper().startswith("OPENAI_API_KEY"):
+            del os.environ[key]
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
