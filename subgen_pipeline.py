@@ -6933,48 +6933,35 @@ def translate_segments_openai(
         f"effective semantic batch={batch_size})..."
     )
 
-    # 1. Define all batches
-    batches = []
-    for batch_start in range(0, len(indexed_segments), batch_size):
-        batch_end = min(len(indexed_segments), batch_start + batch_size)
+    if not indexed_segments:
+        return []
+
+    def build_prompt(batch_start, batch_end):
         context_start = max(0, batch_start - context_window)
         context_end = min(len(indexed_segments), batch_end + context_window)
-        prompt = build_llm_translation_prompt(
+        return build_llm_translation_prompt(
             indexed_segments[context_start:context_end],
             batch_start,
             batch_end,
         )
-        batches.append((batch_start, batch_end, prompt))
 
-    # 2. Translate in parallel
-    from concurrent.futures import ThreadPoolExecutor
-    
-    def translate_batch(batch_info):
-        batch_start, batch_end, prompt = batch_info
+    def request_batch(prompt):
         if provider_id == "openai":
-            response_json = call_openai_structured_translation(
+            return call_openai_structured_translation(
                 prompt,
                 instructions,
                 model,
                 api_env_key=(provider_config or {}).get("openai_api_env_key", "OPENAI_API_KEY"),
             )
-        else:
-            response_json = call_provider_translation(
-                provider_config or {},
-                provider_id,
-                prompt,
-                instructions,
-                model=model,
-            )
-        return batch_start, batch_end, response_json
+        return call_provider_translation(
+            provider_config or {},
+            provider_id,
+            prompt,
+            instructions,
+            model=model,
+        )
 
-    print(f"Translating {len(batches)} batches in parallel...")
-    results = []
-    with ThreadPoolExecutor(max_workers=min(len(batches), 8)) as executor:
-        results = list(executor.map(translate_batch, batches))
-
-    # 3. Process results
-    for batch_start, batch_end, response_json in results:
+    def collect(batch_start, batch_end, response_json):
         record_usage_event(
             provider_config,
             provider_id,
@@ -6982,19 +6969,73 @@ def translate_segments_openai(
             "translation",
             usage=response_json.pop("_usage", None),
         )
-
-        for item in response_json.get("translations", []):
-            index = item.get("index")
-            if batch_start <= index < batch_end:
-                translated_by_index[index] = apply_glossary_to_translation(
+        found = {}
+        for item in response_json.get("translations") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            text = item.get("text")
+            # Models sometimes return the index as a string, or repeat an
+            # index; the first usable answer for each index wins.
+            if batch_start <= index < batch_end and text is not None and index not in found:
+                found[index] = apply_glossary_to_translation(
                     indexed_segments[index]["text"],
-                    item.get("text"),
+                    text,
                     glossary,
                 )
+        return found
 
-        missing = [index for index in range(batch_start, batch_end) if index not in translated_by_index]
-        if missing:
-            raise RuntimeError(f"OpenAI translation response missed subtitle indices: {missing}")
+    def translate_range(batch_start, batch_end):
+        """Translate one range; retry once, then split it in half.
+
+        Only malformed or incomplete responses (bad JSON, missing indices,
+        truncation) are retried. Provider errors such as authentication or
+        quota failures propagate immediately, so they are never re-billed.
+        """
+        last_problem = None
+        for _attempt in range(2):
+            try:
+                response_json = request_batch(build_prompt(batch_start, batch_end))
+                found = collect(batch_start, batch_end, response_json)
+            except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                last_problem = f"unusable response ({exc})"
+                continue
+            missing = [index for index in range(batch_start, batch_end) if index not in found]
+            if not missing:
+                return found
+            last_problem = f"response missed subtitle indices {missing}"
+        if batch_end - batch_start > 1:
+            middle = (batch_start + batch_end) // 2
+            print(
+                f"[TRANSLATION] Batch {batch_start}-{batch_end - 1}: {last_problem}; "
+                "retrying as two smaller batches."
+            )
+            found = translate_range(batch_start, middle)
+            found.update(translate_range(middle, batch_end))
+            return found
+        raise RuntimeError(
+            f"{provider_id} translation failed for subtitle index {batch_start}: {last_problem}"
+        )
+
+    # 1. Define all batches
+    batches = [
+        (batch_start, min(len(indexed_segments), batch_start + batch_size))
+        for batch_start in range(0, len(indexed_segments), batch_size)
+    ]
+
+    # 2. Translate in parallel
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"Translating {len(batches)} batches in parallel...")
+    with ThreadPoolExecutor(max_workers=min(len(batches), 8)) as executor:
+        results = list(executor.map(lambda batch: translate_range(*batch), batches))
+
+    # 3. Merge results
+    for found in results:
+        translated_by_index.update(found)
 
     return [
         {

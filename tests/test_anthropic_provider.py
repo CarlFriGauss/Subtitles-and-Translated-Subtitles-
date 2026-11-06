@@ -45,7 +45,7 @@ def test_refusal_raises_clear_error():
 
 
 def test_truncation_raises_clear_error():
-    with pytest.raises(RuntimeError, match="max_tokens"):
+    with pytest.raises(ValueError, match="max_tokens"):
         providers.anthropic_response_text({"stop_reason": "max_tokens", "content": [{"type": "text", "text": "{"}]})
 
 

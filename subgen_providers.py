@@ -358,7 +358,8 @@ def anthropic_response_text(response):
         category = details.get("category") or "unspecified"
         raise RuntimeError(f"Anthropic declined this translation batch (refusal category: {category}).")
     if stop_reason == "max_tokens":
-        raise RuntimeError("Anthropic stopped at max_tokens before finishing the translation JSON.")
+        # ValueError: callers treat it like malformed JSON and retry with a smaller batch.
+        raise ValueError("Anthropic stopped at max_tokens before finishing the translation JSON.")
     return "".join(item.get("text", "") for item in response.get("content", []) if item.get("type") == "text")
 
 
