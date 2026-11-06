@@ -497,6 +497,29 @@ def import_faster_whisper():
         raise RuntimeError("faster-whisper is required for local transcription timing. Install faster-whisper in the environment.") from e
 
 
+# Community CTranslate2 Whisper models that are not published by Systran.
+# ivrit-ai's Hebrew fine-tune is far more accurate on Hebrew than large-v3
+# (e.g. "זה לא ייאמן" vs "זה לא יהיו אומן", correct names and punctuation).
+FASTER_WHISPER_MODEL_ALIASES = {
+    "ivrit-he": "ivrit-ai/whisper-large-v3-turbo-ct2",
+}
+
+
+def download_community_faster_whisper_model(repo_id, models_root=None):
+    """Download a non-Systran CTranslate2 model into a plain folder.
+
+    Downloads into the Hugging Face cache need symbolic links, which Windows
+    refuses without Developer Mode or administrator rights (WinError 1314).
+    A plain local folder avoids that and is reused on later runs.
+    """
+    from huggingface_hub import snapshot_download
+
+    target = Path(models_root or MODEL_CACHE_DIR) / repo_id.replace("/", "--")
+    if not (target / "model.bin").is_file():
+        print(f"[MODEL] Downloading {repo_id} (first use only)...")
+    return snapshot_download(repo_id, local_dir=str(target))
+
+
 def resolve_faster_whisper_model_reference(
     model_reference,
     *,
@@ -505,6 +528,10 @@ def resolve_faster_whisper_model_reference(
     requested = str(model_reference or "").strip()
     if not requested:
         raise RuntimeError("A Faster-Whisper model name or path is required.")
+    requested = FASTER_WHISPER_MODEL_ALIASES.get(requested, requested)
+    owner = requested.split("/", 1)[0] if "/" in requested and not Path(requested).expanduser().is_absolute() else ""
+    if owner and owner.lower() != "systran" and not requested.startswith((".", "~")):
+        return download_community_faster_whisper_model(requested)
 
     required_files = (
         "config.json",
