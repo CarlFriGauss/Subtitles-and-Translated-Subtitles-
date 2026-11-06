@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 
 from .config import load_settings
 from .db import Artifact, Job, JobStatus, ProviderCredential, Video, create_database
+from .sandbox import sanitize_pipeline_config, subprocess_environment
 from .security import CredentialCipher
 from .srt import parse_srt, render_srt
 from .storage import create_storage
@@ -113,10 +114,9 @@ def decrypted_provider_environment(session_factory, cipher, user_id, pipeline_co
         preferred = preferred_profiles.get(credential.provider, "default")
         if credential.profile != preferred:
             continue
+        # Only built-in providers: a user-chosen env_key could overwrite any
+        # variable in the worker's own environment.
         env_key = PROVIDER_ENV_KEYS.get(credential.provider)
-        if not env_key:
-            custom = (pipeline_config.get("custom_providers") or {}).get(credential.provider) or {}
-            env_key = custom.get("env_key")
         if not env_key:
             continue
         original[env_key] = os.environ.get(env_key)
@@ -334,7 +334,7 @@ def process_transcription_job(
         source_key = video.object_key
         filename = video.original_name
         user_id = job.user_id
-        pipeline_config = dict(job.pipeline_config or {})
+        pipeline_config = sanitize_pipeline_config(dict(job.pipeline_config or {}))
         style_config = dict(job.style_config or {})
         target_language = job.target_language
         cache_action = job.cache_action
@@ -378,8 +378,7 @@ def process_transcription_job(
             job.stage = "transcription"
             job.progress = 10
 
-        env = os.environ.copy()
-        env["SUBGEN_DATA_DIR"] = str(data_root)
+        env = subprocess_environment({"SUBGEN_DATA_DIR": str(data_root)})
         request = {
             "video_path": str(input_path),
             "output_dir": str(output_root),
@@ -498,7 +497,7 @@ def process_burn_job(
         source_key = video.object_key
         filename = video.original_name
         review = dict(job.review_manifest or {})
-        pipeline_config = dict(job.pipeline_config or {})
+        pipeline_config = sanitize_pipeline_config(dict(job.pipeline_config or {}))
         style_config = dict(job.style_config or {})
         target_language = job.target_language
         user_id = job.user_id
@@ -518,8 +517,7 @@ def process_burn_job(
         srt_path.write_bytes(burn_gate["subtitle_bytes"])
         review_path = output_root / "approved.review.json"
         save_review(review_path, review)
-        env = os.environ.copy()
-        env["SUBGEN_DATA_DIR"] = str(data_root)
+        env = subprocess_environment({"SUBGEN_DATA_DIR": str(data_root)})
         request = {
             "video_path": str(input_path),
             "srt_path": str(srt_path),

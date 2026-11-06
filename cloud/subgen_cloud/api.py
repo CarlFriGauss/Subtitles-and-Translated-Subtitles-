@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
 from .config import load_settings
+from .sandbox import find_forbidden_config_key, sanitize_pipeline_config, subprocess_environment
 from .dispatch import dispatch_worker
 from .db import (
     ACTIVE_JOB_STATUSES,
@@ -84,6 +85,16 @@ def durable_review_for_job(job):
 
 
 def reject_embedded_secrets(value, path="config"):
+    forbidden = find_forbidden_config_key(value, path)
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{forbidden} is not allowed: custom providers and endpoint overrides are not available in the cloud edition",
+        )
+    _reject_secret_like_keys(value, path)
+
+
+def _reject_secret_like_keys(value, path="config"):
     if isinstance(value, dict):
         for key, child in value.items():
             if not SAFE_CONFIG_KEY.match(str(key)):
@@ -91,10 +102,10 @@ def reject_embedded_secrets(value, path="config"):
             normalized = str(key).lower()
             if any(word in normalized for word in SECRET_WORDS):
                 raise HTTPException(status_code=400, detail="API keys and secrets must use the encrypted Credentials section")
-            reject_embedded_secrets(child, f"{path}.{key}")
+            _reject_secret_like_keys(child, f"{path}.{key}")
     elif isinstance(value, list):
         for child in value:
-            reject_embedded_secrets(child, path)
+            _reject_secret_like_keys(child, path)
 
 
 def user_object_key(user_id, video_id, filename):
@@ -539,7 +550,7 @@ def create_app(settings=None, session_factory=None, storage=None):
                 raise HTTPException(status_code=404, detail="Job not found")
             review = durable_review_for_job(job)
             initial_revision = review.get("revision_hash")
-            pipeline_config = dict(job.pipeline_config or {})
+            pipeline_config = sanitize_pipeline_config(dict(job.pipeline_config or {}))
             provider = pipeline_config.get("translation_provider", "local")
             credential = None
             if provider != "local":
@@ -557,7 +568,11 @@ def create_app(settings=None, session_factory=None, storage=None):
                         status_code=409,
                         detail=f"No authorized {provider} credential profile is available",
                     )
-        environment = os.environ.copy()
+        # Never pass the API's own secrets (DB URL, master key, storage keys)
+        # to a subprocess that runs user-supplied configuration.
+        environment = subprocess_environment(
+            {"SUBGEN_DATA_DIR": os.environ["SUBGEN_DATA_DIR"]} if os.environ.get("SUBGEN_DATA_DIR") else None
+        )
         if credential:
             from subgen_providers import get_provider_registry
 
