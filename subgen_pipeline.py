@@ -7493,21 +7493,61 @@ def merge_transcript_chunks(chunk_texts, max_overlap_words=120, min_overlap_word
     return merged_text, merge_info
 
 
+def _boundary_match_tokens(text):
+    return [token for token in re.findall(r"\w+", unicodedata.normalize("NFKC", str(text or "")).casefold())]
+
+
+def remove_boundary_repeat(previous_text, new_text, min_overlap_words=2):
+    """Drop the words at the end of ``previous_text`` that ``new_text`` repeats.
+
+    A chunk that ends mid-sentence yields "we went to the"; the next chunk,
+    which starts earlier because chunks overlap, yields "we went to the
+    store". Returns (trimmed_previous_text, removed_word_count).
+    """
+    previous_words = str(previous_text or "").split()
+    previous_tokens = [_boundary_match_tokens(word) for word in previous_words]
+    new_tokens = _boundary_match_tokens(new_text)
+    flat_previous = [token for tokens in previous_tokens for token in tokens]
+    best = 0
+    for size in range(min(len(flat_previous), len(new_tokens)), 0, -1):
+        if flat_previous[-size:] == new_tokens[:size]:
+            best = size
+            break
+    if best < min_overlap_words and best != len(flat_previous):
+        return previous_text, 0
+    if best == 0:
+        return previous_text, 0
+    # Map the matched token count back to whole words of the original text.
+    remaining_tokens = best
+    cut = len(previous_words)
+    while cut > 0 and remaining_tokens > 0:
+        cut -= 1
+        remaining_tokens -= len(previous_tokens[cut])
+    return " ".join(previous_words[:cut]), len(previous_words) - cut
+
+
 def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
     accepted_segments = []
     merge_info = []
+    groups = list(chunk_segment_groups or [])
 
-    for group in chunk_segment_groups or []:
+    for group_position, group in enumerate(groups):
         segments = group.get("segments") or []
         chunk_index = int(group.get("index") or 1)
         duplicate_cutoff = float(group.get("start") or 0.0)
         if chunk_index > 1:
             duplicate_cutoff += max(0.0, float(overlap_seconds or 0.0))
+        # A chunk re-transcribed with extra context audio can return speech past
+        # its own end; the next chunk transcribes that audio itself.
+        has_later_group = group_position + 1 < len(groups)
+        group_end = float(group.get("end")) if has_later_group and group.get("end") is not None else None
 
         kept = []
         skipped = []
         trimmed = []
         boundary_replacements = []
+        boundary_text_dedupes = []
+        beyond_chunk_end = 0
         for segment in segments:
             start = float(segment.get("start", 0.0))
             end = float(segment.get("end", start))
@@ -7518,6 +7558,31 @@ def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
             if chunk_index > 1 and end <= duplicate_cutoff:
                 skipped.append(segment)
                 continue
+            if group_end is not None and start >= group_end:
+                beyond_chunk_end += 1
+                continue
+
+            if (
+                chunk_index > 1
+                and granularity != "word"
+                and start < duplicate_cutoff < end
+                and accepted_segments
+                and accepted_segments[-1]["end"] > start
+            ):
+                previous = accepted_segments[-1]
+                trimmed_text, removed_words = remove_boundary_repeat(previous.get("text", ""), text)
+                if removed_words:
+                    boundary_text_dedupes.append({
+                        "previous_text": previous.get("text", ""),
+                        "kept_previous_text": trimmed_text,
+                        "removed_words": removed_words,
+                        "next_text": text,
+                    })
+                    if trimmed_text.strip():
+                        previous["text"] = normalize_subtitle_text(trimmed_text)
+                        previous["end"] = max(previous["start"], min(previous["end"], start))
+                    else:
+                        accepted_segments.pop()
 
             if (
                 chunk_index > 1
@@ -7573,6 +7638,8 @@ def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
                 "segments_trimmed": len(trimmed),
                 "trimmed_segments": trimmed[:5],
                 "boundary_word_replacements": boundary_replacements[:5],
+                "boundary_text_dedupes": boundary_text_dedupes[:5],
+                "segments_beyond_chunk_end": beyond_chunk_end,
             })
 
     accepted_segments.sort(key=lambda segment: (segment["start"], segment["end"]))
