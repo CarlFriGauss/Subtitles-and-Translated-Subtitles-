@@ -6093,7 +6093,57 @@ def bundled_subtitle_fonts_dir():
 
 
 def escape_ffmpeg_filter_path(path):
+    """Deprecated: kept for external callers. Use build_subtitles_filter()."""
     return str(Path(path)).replace("\\", "/").replace(":", "\\:")
+
+
+_SAFE_FONT_NAME = re.compile(r"^[\w .-]{1,64}$")
+
+
+def sanitize_font_name(name, default="Arial"):
+    """Return a font family name that cannot break out of an ffmpeg/ASS style.
+
+    The font name is inserted into force_style; quotes, commas, colons, '=' or
+    brackets would let a caller inject extra style fields or ffmpeg filters.
+    """
+    candidate = str(name or "").strip()
+    return candidate if _SAFE_FONT_NAME.match(candidate) else default
+
+
+def escape_ffmpeg_filter_option(value):
+    """First escaping level: a value inside one filter's option list."""
+    return re.sub(r"([\\':])", r"\\\1", str(value))
+
+
+def escape_ffmpeg_filtergraph(description):
+    """Second escaping level: one filter description inside a filtergraph."""
+    return re.sub(r"([\\'\[\],;])", r"\\\1", str(description))
+
+
+def ffmpeg_filter_path(path):
+    """A path for a filter option: forward slashes, otherwise unchanged."""
+    return str(path).replace("\\", "/")
+
+
+def build_subtitles_filter(srt_path, original_size, force_style=None, fonts_dir=None):
+    """Build the -vf argument for ffmpeg's subtitles filter.
+
+    Every value is escaped at both levels described in ffmpeg's "Notes on
+    filtergraph escaping", so paths containing apostrophes, commas, colons or
+    brackets (e.g. "Don't stop.he.srt") work and cannot inject other filters.
+    ``force_style`` is a list of (field, value) pairs.
+    """
+    options = [
+        f"filename={escape_ffmpeg_filter_option(ffmpeg_filter_path(srt_path))}",
+        f"original_size={original_size}",
+        "charenc=UTF-8",
+    ]
+    if fonts_dir:
+        options.append(f"fontsdir={escape_ffmpeg_filter_option(ffmpeg_filter_path(fonts_dir))}")
+    if force_style:
+        style = ",".join(f"{field}={value}" for field, value in force_style)
+        options.append(f"force_style={escape_ffmpeg_filter_option(style)}")
+    return escape_ffmpeg_filtergraph("subtitles=" + ":".join(options))
 
 
 def apply_script_safe_subtitle_style(style_config, lang_code, video_metadata=None, manual_style=False):
@@ -6138,7 +6188,7 @@ def validate_visual_style(
     style = dict(base)
     raw_style = raw_style or {}
     bounds = visual_style_bounds(video_metadata, tiktok_style=tiktok_style)
-    style["font_name"] = str(raw_style.get("font_name") or base.get("font_name") or "Arial").strip() or "Arial"
+    style["font_name"] = sanitize_font_name(raw_style.get("font_name") or base.get("font_name") or "Arial")
     font_scale = str(raw_style.get("font_scale") or base.get("font_scale") or ("large" if tiktok_style else "normal")).strip().lower()
     scale_fraction = {
         "small": 0.20,
@@ -6305,7 +6355,7 @@ def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadat
         allow_position_change=False,
         manual_style=manual_style,
     )
-    font_name = style_config.get("font_name", "Arial")
+    font_name = sanitize_font_name(style_config.get("font_name", "Arial"))
     font_size = style_config.get("font_size", 20)
     primary_color = hex_to_ass_color(style_config.get("primary_color", "#FFFFFF"))
     text_outline_color = hex_to_ass_color(style_config.get("outline_color", "#000000"))
@@ -6320,25 +6370,24 @@ def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadat
     margin_v = style_config.get("margin_v", 30)
     margin_l = style_config.get("margin_l", 20)
     margin_r = style_config.get("margin_r", 20)
-    fonts_dir = escape_ffmpeg_filter_path(bundled_subtitle_fonts_dir())
-    fonts_part = f"fontsdir='{fonts_dir}':" if font_name == "Amiri" else ""
-    return (
-        f"subtitles=filename='{srt_filename_relative}':"
-        f"original_size={original_size}:"
-        f"charenc=UTF-8:"
-        f"{fonts_part}"
-        f"force_style='FontName={font_name},"
-        f"FontSize={font_size},"
-        f"PrimaryColour={primary_color},"
-        f"OutlineColour={text_outline_color},"
-        f"BackColour={background_color},"
-        f"Shadow={shadow},"
-        f"Outline={outline_width},"
-        f"BorderStyle={border_style},"
-        f"Alignment={alignment},"
-        f"MarginV={margin_v},"
-        f"MarginL={margin_l},"
-        f"MarginR={margin_r}'"
+    return build_subtitles_filter(
+        srt_filename_relative,
+        original_size,
+        force_style=[
+            ("FontName", font_name),
+            ("FontSize", font_size),
+            ("PrimaryColour", primary_color),
+            ("OutlineColour", text_outline_color),
+            ("BackColour", background_color),
+            ("Shadow", shadow),
+            ("Outline", outline_width),
+            ("BorderStyle", border_style),
+            ("Alignment", alignment),
+            ("MarginV", margin_v),
+            ("MarginL", margin_l),
+            ("MarginR", margin_r),
+        ],
+        fonts_dir=bundled_subtitle_fonts_dir() if font_name == "Amiri" else None,
     )
 
 
@@ -6370,7 +6419,7 @@ def render_visual_style_previews(video_path, srt_path, output_root, candidates, 
             try:
                 preview_srt_relative = preview_srt_path.relative_to(cwd_dir).as_posix()
             except ValueError:
-                preview_srt_relative = str(preview_srt_path).replace("\\", "/").replace(":", "\\:")
+                preview_srt_relative = str(preview_srt_path)
             vf_arg = subtitle_filter_for_style(
                 preview_srt_relative,
                 candidate["style"],
@@ -10004,7 +10053,7 @@ def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_conf
     try:
         srt_filename_relative = srt_path_obj.relative_to(cwd_dir).as_posix()
     except ValueError:
-        srt_filename_relative = str(srt_path_obj).replace("\\", "/").replace(":", "\\:")
+        srt_filename_relative = str(srt_path_obj)
     if output_path_obj.parent == cwd_dir:
         output_filename_argument = output_path_obj.name
     else:
@@ -10029,35 +10078,35 @@ def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_conf
         vf_arg = subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata, lang_code=lang_code, manual_style=manual_style)
     else:
         # Default styles based on language
-        fonts_dir = escape_ffmpeg_filter_path(bundled_subtitle_fonts_dir())
-
         if uses_arabic_script_subtitle_font(lang_code):
-            vf_arg = (
-                f"subtitles=filename='{srt_filename_relative}':"
-                f"original_size={original_size}:"
-                f"charenc=UTF-8:"
-                f"fontsdir='{fonts_dir}':"
-                "force_style='FontName=Amiri,"
-                "FontSize=28,"
-                "PrimaryColour=&HFFFFFF&,"  # White
-                "OutlineColour=&H000000&,"  # Black
-                "BackColour=&H000000&,"     # Black
-                "Shadow=1,"
-                "Outline=1,"
-                "BorderStyle=3,"
-                "Alignment=2'"
+            vf_arg = build_subtitles_filter(
+                srt_filename_relative,
+                original_size,
+                force_style=[
+                    ("FontName", "Amiri"),
+                    ("FontSize", 28),
+                    ("PrimaryColour", "&HFFFFFF&"),  # White
+                    ("OutlineColour", "&H000000&"),  # Black
+                    ("BackColour", "&H000000&"),     # Black
+                    ("Shadow", 1),
+                    ("Outline", 1),
+                    ("BorderStyle", 3),
+                    ("Alignment", 2),
+                ],
+                fonts_dir=bundled_subtitle_fonts_dir(),
             )
         else:
-            vf_arg = (
-                f"subtitles=filename='{srt_filename_relative}':"
-                f"original_size={original_size}:"
-                f"charenc=UTF-8:"
-                "force_style='FontSize=20,"
-                "PrimaryColour=&HFFFFFF&,"
-                "OutlineColour=&H000000&,"
-                "Shadow=1,"
-                "Outline=1,"
-                "BorderStyle=3'"
+            vf_arg = build_subtitles_filter(
+                srt_filename_relative,
+                original_size,
+                force_style=[
+                    ("FontSize", 20),
+                    ("PrimaryColour", "&HFFFFFF&"),
+                    ("OutlineColour", "&H000000&"),
+                    ("Shadow", 1),
+                    ("Outline", 1),
+                    ("BorderStyle", 3),
+                ],
             )
 
     # ----------------------------------
