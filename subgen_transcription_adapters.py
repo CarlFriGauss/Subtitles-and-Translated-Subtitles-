@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from subgen_http import post_for_json
 from subgen_providers import post_json, provider_retry_delay, require_provider_key
 from subgen_transcription import (
     CURRENT_PRODUCTION_PROMPT_VERSION,
@@ -396,31 +397,13 @@ def post_multipart_json(
     timeout: int = 600,
 ) -> Dict[str, Any]:
     boundary, body = _multipart_body(fields, file_path)
-    max_retries = 6
-    for attempt in range(max_retries + 1):
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", **headers},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            if (exc.code == 429 or 500 <= exc.code < 600) and attempt < max_retries:
-                delay = 2.0 * (2 ** attempt) + random.uniform(0.1, 1.0)
-                if exc.code == 429:
-                    delay = provider_retry_delay(error_body, delay)
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"Audio transcription failed: HTTP {exc.code}: {error_body}") from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            if attempt < max_retries:
-                time.sleep(2.0 * (2 ** attempt) + random.uniform(0.1, 1.0))
-                continue
-            raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+    return post_for_json(
+        url,
+        body,
+        {"Content-Type": f"multipart/form-data; boundary={boundary}", **headers},
+        timeout=timeout,
+        label="Audio transcription",
+    )
 
 
 def call_xai_transcription(

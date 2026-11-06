@@ -10,6 +10,7 @@ import time
 import random
 import re
 
+from subgen_http import post_for_json, provider_quota_is_non_retryable, provider_retry_delay  # noqa: F401  (re-exported)
 from subgen_transcription import (
     CURRENT_PRODUCTION_PROMPT_VERSION,
     PROFESSIONAL_STRUCTURED_PROMPT_VERSION,
@@ -179,75 +180,14 @@ def translation_schema():
     }
 
 
-def provider_retry_delay(error_body, fallback_delay):
-    try:
-        parsed = json.loads(error_body)
-    except Exception:
-        parsed = {}
-    for detail in (parsed.get("error") or {}).get("details", []):
-        retry_delay = detail.get("retryDelay")
-        if isinstance(retry_delay, str):
-            match = re.match(r"^(\d+(?:\.\d+)?)s$", retry_delay.strip())
-            if match:
-                return max(fallback_delay, float(match.group(1)) + random.uniform(0.25, 1.25))
-    return fallback_delay
-
-
-def provider_quota_is_non_retryable(error_body):
-    """Daily/project quota exhaustion cannot recover inside an HTTP retry loop."""
-    try:
-        parsed = json.loads(error_body)
-    except Exception:
-        return False
-    error = parsed.get("error") or {}
-    if str(error.get("status") or "").upper() != "RESOURCE_EXHAUSTED":
-        return False
-    for detail in error.get("details") or []:
-        for violation in detail.get("violations") or []:
-            quota_id = str(violation.get("quotaId") or "").casefold()
-            metric = str(violation.get("quotaMetric") or "").casefold()
-            if "perday" in quota_id or "per_day" in quota_id or "requests_per_day" in metric:
-                return True
-    return "current quota" in str(error.get("message") or "").casefold() and "per day" in str(error)
-
-
 def post_json(url, payload, headers, timeout=240):
-    max_retries = 6
-    base_delay = 2.0  # seconds
-    
-    for attempt in range(max_retries + 1):
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", **headers},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            if e.code == 429 and provider_quota_is_non_retryable(error_body):
-                raise RuntimeError(
-                    f"Provider request failed with non-retryable daily quota: HTTP {e.code}: {error_body}"
-                ) from e
-            # Retry on rate limit (429) or server errors (5xx)
-            if (e.code == 429 or 500 <= e.code < 600) and attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                if e.code == 429:
-                    delay = provider_retry_delay(error_body, delay)
-                print(f"Request failed with HTTP {e.code}. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"Provider request failed: HTTP {e.code}: {error_body}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
-            # Retry on network timeout or connection reset/failure
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                print(f"Request failed: {e}. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"Provider request failed: {e}") from e
+    return post_for_json(
+        url,
+        json.dumps(payload).encode("utf-8"),
+        {"Content-Type": "application/json", **headers},
+        timeout=timeout,
+        label="Provider request",
+    )
 
 
 def parse_json_text(text):

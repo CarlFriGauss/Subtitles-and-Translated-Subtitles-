@@ -52,6 +52,7 @@ import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from tqdm import tqdm
+from subgen_http import post_for_json
 from subgen_db import (
     init_db,
     calculate_video_hash,
@@ -831,24 +832,17 @@ def build_multipart_form_data(fields, files):
 def post_openai_multipart(endpoint, fields, files, timeout=240, api_env_key="OPENAI_API_KEY"):
     api_key = require_openai_api_key(api_env_key)
     body, boundary = build_multipart_form_data(fields, files)
-    request = urllib.request.Request(
+    # Previously no retry at all: one 429 from a parallel chunk aborted the job.
+    return post_for_json(
         endpoint,
-        data=body,
-        headers={
+        body,
+        {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
-        method="POST",
+        timeout=timeout,
+        label="OpenAI request",
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI request failed: HTTP {e.code}: {error_body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"OpenAI request failed: {e}") from e
 
 
 def split_text_into_segment_count(text, segment_count):
@@ -6788,42 +6782,16 @@ def call_openai_structured_json(
         },
     }
 
-    import time
-    import random
-
-    max_retries = 3
-    base_delay = 2.0
-    response_data = None
-
-    for attempt in range(max_retries + 1):
-        request = urllib.request.Request(
-            "https://api.openai.com/v1/responses",
-            data=json.dumps(request_payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=240) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-                break
-        except urllib.error.HTTPError as e:
-            if (e.code == 429 or 500 <= e.code < 600) and attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                print(f"OpenAI translation HTTP {e.code} error. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            error_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"{error_label} failed: HTTP {e.code}: {error_body}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                print(f"OpenAI translation network error: {e}. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"{error_label} failed: {e}") from e
+    response_data = post_for_json(
+        "https://api.openai.com/v1/responses",
+        json.dumps(request_payload).encode("utf-8"),
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=240,
+        label=error_label,
+    )
 
     response_text = extract_response_text(response_data)
     if not response_text:
