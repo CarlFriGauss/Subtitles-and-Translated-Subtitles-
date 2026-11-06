@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from subgen_paths import CONFIG_PATH, ENV_PATH, SOURCE_DIR
+from subgen_utils import atomic_write_text, preserve_corrupt_file
 from subgen_version import __version__
 
 from subgen_pipeline import (
@@ -194,19 +195,12 @@ def migrate_config_values(config):
     # Preserve explicit transcription model choices. Pipeline planning depends on
     # the selected model's real capabilities, so migration must not substitute a
     # different audio model behind the user's back.
-    if config.get("llm_model") == "gpt-5.2":
-        config["llm_model"] = "gpt-4o"
-    if config.get("qa_model") == "gpt-5.2":
-        config["qa_model"] = "gpt-4o-mini"
-    if config.get("visual_style_model") == "gpt-5.2":
-        config["visual_style_model"] = "gpt-4o-mini"
-
     # Migrate provider_models if they exist
     provider_models = config.setdefault("provider_models", {})
     openai_models = provider_models.setdefault("openai", {})
     if not openai_models.get("transcription"):
         openai_models["transcription"] = "whisper-1"
-    if openai_models.get("translation") == "gpt-5.2" or not openai_models.get("translation"):
+    if not openai_models.get("translation"):
         openai_models["translation"] = "gpt-4o"
 
     # Clean up pricing config if it has the old keys
@@ -225,7 +219,10 @@ def load_config():
 
     try:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("configuration root must be an object")
     except Exception:
+        preserve_corrupt_file(CONFIG_PATH)
         return default_config()
 
     if "subtitle_mode" not in loaded:
@@ -254,7 +251,7 @@ def load_config():
 
 
 def save_config(config):
-    CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(CONFIG_PATH, json.dumps(config, indent=2, ensure_ascii=False))
 
 
 def credential_env_keys(config=None):
@@ -1178,13 +1175,15 @@ def load_batch_state(output_root):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        # Losing batch progress would re-run (and re-bill) every item.
+        preserve_corrupt_file(path)
         return None
 
 
 def save_batch_state(output_root, state):
     path = batch_state_path(output_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(path, json.dumps(state, indent=2, ensure_ascii=False))
 
 
 def build_batch_pipeline_config(config, args, transcription_provider, translation_provider, openai_profile, openai_api_env_key, source_language, source_dialect):
