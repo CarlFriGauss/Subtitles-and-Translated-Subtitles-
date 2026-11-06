@@ -6083,6 +6083,48 @@ def visual_style_bounds(video_metadata=None, tiktok_style=False):
 
 ARABIC_SCRIPT_SUBTITLE_LANGUAGES = {"ar", "fa", "ur", "ps", "sd"}
 
+# Languages written right to left. libass lays out every subtitle line with a
+# left-to-right base direction, so without explicit embedding a Hebrew line such
+# as "שלום, מה שלומך?" is burned with the question mark on the wrong side.
+RTL_SUBTITLE_LANGUAGES = {"he", "iw", "yi", "ar", "fa", "ur", "ps", "sd", "ckb", "ug", "dv"}
+_RTL_EMBEDDING = "\u202b"  # RIGHT-TO-LEFT EMBEDDING
+_POP_DIRECTIONAL = "\u202c"  # POP DIRECTIONAL FORMATTING
+
+
+def is_rtl_subtitle_language(lang_code):
+    base = re.split(r"[-_]", str(lang_code or "").strip().lower())[0]
+    return base in RTL_SUBTITLE_LANGUAGES
+
+
+def embed_rtl_line(line):
+    """Wrap one subtitle line so it renders with a right-to-left base direction."""
+    if not line.strip() or line.startswith(_RTL_EMBEDDING):
+        return line
+    return f"{_RTL_EMBEDDING}{line}{_POP_DIRECTIONAL}"
+
+
+def rtl_burn_srt_text(srt_text):
+    """Return SRT text whose subtitle lines carry RTL embedding marks.
+
+    Index and timing lines are left untouched. Used only for the copy that is
+    handed to ffmpeg; exported and approved SRT files are never modified.
+    """
+    blocks = re.split(r"\r?\n\s*\r?\n", str(srt_text).lstrip("\ufeff").strip("\r\n"))
+    rendered = []
+    for block in blocks:
+        lines = block.splitlines()
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is not None:
+            lines = lines[: timing_index + 1] + [embed_rtl_line(line) for line in lines[timing_index + 1:]]
+        rendered.append("\n".join(lines))
+    return "\n\n".join(rendered) + "\n"
+
+
+def subtitle_language_code(value):
+    """A usable language code, or None for placeholders such as 'auto'/'source'."""
+    code = str(value or "").strip()
+    return code if re.fullmatch(r"[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*", code) and code.lower() not in {"auto", "src"} else None
+
 
 def uses_arabic_script_subtitle_font(lang_code):
     return str(lang_code or "").lower().split("-")[0] in ARABIC_SCRIPT_SUBTITLE_LANGUAGES
@@ -6408,11 +6450,14 @@ def render_visual_style_previews(video_path, srt_path, output_root, candidates, 
             timestamp = (float(segment["start"]) + float(segment["end"])) / 2
             duration = max(2.0, min(5.0, float(segment["end"]) - float(segment["start"])))
             preview_srt_path = preview_root / f"{candidate['candidate_id']}_{index}.srt"
+            preview_text = segment["text"]
+            if is_rtl_subtitle_language(lang_code):
+                preview_text = "\n".join(embed_rtl_line(line) for line in str(preview_text).split("\n"))
             write_srt(
                 [{
                     "start": 0.0,
                     "end": duration,
-                    "text": segment["text"],
+                    "text": preview_text,
                 }],
                 preview_srt_path,
             )
@@ -10038,6 +10083,22 @@ def write_srt(segments, srt_path):
 # Step 5: Burn subtitles
 # -----------------------------
 def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_config=None, manual_style=False):
+    """Burn subtitles; right-to-left languages are burned from a marked copy."""
+    if not is_rtl_subtitle_language(lang_code):
+        return _burn_subtitles_file(video_path, srt_path, output_path, lang_code, style_config, manual_style)
+    source = Path(srt_path).resolve()
+    burn_copy = source.with_name(f"{source.stem}.rtl-burn{source.suffix}")
+    burn_copy.write_text(rtl_burn_srt_text(source.read_text(encoding="utf-8-sig")), encoding="utf-8")
+    try:
+        return _burn_subtitles_file(video_path, burn_copy, output_path, lang_code, style_config, manual_style)
+    finally:
+        try:
+            burn_copy.unlink()
+        except OSError:
+            pass
+
+
+def _burn_subtitles_file(video_path, srt_path, output_path, lang_code=None, style_config=None, manual_style=False):
     video_path_obj = Path(video_path).resolve()
     srt_path_obj = Path(srt_path).resolve()
     output_path_obj = Path(output_path).resolve()
@@ -10306,6 +10367,13 @@ def main(
         mp4_suffix = "_tiktok" if is_tiktok else ""
         burn_lang_code = target_language or "en"
         output_path = output_root / f"{base}{mp4_suffix}_subtitled_{burn_lang_code}.mp4"
+        # The file name keeps its historical "_en" suffix for source-language
+        # burns; fonts and text direction follow the language actually burned.
+        style_lang_code = (
+            subtitle_language_code(target_language)
+            or subtitle_language_code((approved_review or {}).get("source_language"))
+            or burn_lang_code
+        )
         effective_style_config = style_config or {}
         
         # Check if the subtitle styling has changed compared to the last run
@@ -10341,7 +10409,7 @@ def main(
                 effective_style_config, visual_style_report = resolve_visual_style_for_video(
                     str(video_path_obj),
                     output_root,
-                    burn_lang_code,
+                    style_lang_code,
                     style_config,
                     pipeline_config,
                     srt_path=str(srt_path),
@@ -10350,7 +10418,7 @@ def main(
                 str(video_path_obj),
                 str(srt_path),
                 str(output_path),
-                lang_code=burn_lang_code,
+                lang_code=style_lang_code,
                 style_config=effective_style_config,
                 manual_style=manual_style_requested,
             )

@@ -920,6 +920,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function addLog(message, type = 'info') {
         const line = document.createElement('div');
         line.className = `log-line ${type}`;
+        line.dir = 'auto';
         
         // Format time
         const now = new Date();
@@ -1532,7 +1533,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? `<span class="issue-status">${issue.status === 'accepted' ? 'Accepted' : 'Resolved'}</span>`
                     : '';
             return `<div class="quality-issue ${severity === 'critical' ? 'error' : ''} ${resolved ? 'resolved' : ''}" data-cue-index="${cueIndex > 0 ? cueIndex : ''}" data-start-seconds="${issue.start_seconds ?? ''}">` +
-                `<button type="button" class="issue-jump"><span>${severity}</span><span class="issue-copy"><span>${escapeHtml(issue.message)}</span>${evidenceSummary ? `<small class="issue-evidence">${escapeHtml(evidenceSummary)}</small>` : ''}</span></button>${action}</div>`;
+                `<button type="button" class="issue-jump"><span>${severity}</span><span class="issue-copy"><span dir="auto">${escapeHtml(issue.message)}</span>${evidenceSummary ? `<small class="issue-evidence">${escapeHtml(evidenceSummary)}</small>` : ''}</span></button>${action}</div>`;
         }).join('');
         editorQualityIssues.querySelectorAll('[data-cue-index]').forEach(button => {
             button.querySelector('.issue-jump')?.addEventListener('click', () => {
