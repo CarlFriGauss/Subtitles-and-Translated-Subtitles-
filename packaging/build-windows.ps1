@@ -142,6 +142,8 @@ Write-Host "Bundling native FFmpeg runtime from $FfmpegDirectory"
 New-Item -ItemType Directory -Path $LicenseResources -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $Root "packaging\THIRD_PARTY_NOTICES.txt") -Destination $LicenseResources -Force
 Copy-Item -LiteralPath (Join-Path $Root "web\vendor\LUCIDE_LICENSE.txt") -Destination $LicenseResources -Force
+# The Amiri font is bundled for Arabic-script subtitles; the SIL OFL 1.1 requires its license to ship with it.
+Copy-Item -LiteralPath (Join-Path $Root "AMIRI_FONT_LICENSE.txt") -Destination $LicenseResources -Force
 
 Push-Location $Desktop
 try {
