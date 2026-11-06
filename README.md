@@ -152,31 +152,31 @@ SubGen opens the default browser at <http://localhost:8080>. The server listens 
 
 Cloning the repository is not required.
 
-1. Open the [SubGen v0.4.1 release](https://github.com/CarlFriGauss/Subtitles-and-Translated-Subtitles-/releases/tag/v0.4.1).
-2. Download `SubGen_0.4.1_x64-setup.exe`.
+1. Open the [SubGen v0.4.4 release](https://github.com/CarlFriGauss/Subtitles-and-Translated-Subtitles-/releases/tag/v0.4.4).
+2. Download `SubGen_0.4.4_x64-setup.exe`.
 3. Verify its SHA-256 before running it.
 
 PowerShell:
 
 ```powershell
-Get-FileHash "$HOME\Downloads\SubGen_0.4.1_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "$HOME\Downloads\SubGen_0.4.4_x64-setup.exe" -Algorithm SHA256
 ```
 
 Expected SHA-256:
 
 ```text
-57DADD5AF9044CFE63BD12641D7033B8626687CFCD48A65EBC123136F61C2234
+6ED54D7F02623975AF3991D1AC5E3ED56630C031861D3B9EAAE7C9D0D098482E
 ```
 
 The installer is not digitally signed, so Windows SmartScreen may warn. Continue only when the installer came from the release above and the hash matches.
 
 The desktop installer contains the application backend, web UI, FFmpeg/ffprobe, fonts, and alignment dependencies. End users do not need Python, Conda, Rust, Node.js, or a separate FFmpeg installation.
 
-Installed application data is stored below `%LOCALAPPDATA%\SubGen`.
+Installed application data is stored below `%LOCALAPPDATA%\com.subgen.studio`.
 
 ### Phone access through the desktop app
 
-Open **Mobile Access** in the installed app, connect the phone and computer to the same trusted private network, and scan the displayed QR code. Allow Windows Firewall access on private networks only. Never expose SubGen through router port forwarding or an untrusted Wi-Fi network.
+Phone access is off by default; while it is off, SubGen accepts connections from the Windows computer only. Open **Mobile Access** in the installed app, turn on **Allow phones on this network to connect**, connect the phone and computer to the same trusted private network, and scan the displayed QR code. Turn it off again when you no longer need it. Allow Windows Firewall access on private networks only. Never expose SubGen through router port forwarding or an untrusted Wi-Fi network.
 
 ## 3. Future cloud web/mobile PWA
 
@@ -203,8 +203,17 @@ To run the exact public source associated with the installer release:
 
 ```text
 git fetch --tags
-git switch --detach v0.4.1
+git switch --detach v0.4.4
 ```
+
+## Running the tests
+
+```text
+python -m pip install -e ".[dev]"
+python -m pytest
+```
+
+Tests never call paid providers: they run with provider API keys removed from the environment and use a temporary data directory. Tests that render subtitles need FFmpeg on `PATH` and are skipped without it. `python scripts/check_versions.py` checks that the release version matches in every file that contains it. The same checks run in GitHub Actions on every pull request.
 
 ## Security and support
 
