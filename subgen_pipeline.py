@@ -10173,6 +10173,11 @@ def main(
     reuse_source_timing = cache_policy["reuse_source_timing"]
     reuse_translation = cache_policy["reuse_translation"]
     force = not reuse_translation
+    # "reburn" keeps every cached result but must still render a new video.
+    force_burn = bool(cache_policy.get("force_burn")) or force
+    # Decide this before tiktok_style is added below, which would make every
+    # style_config look user-supplied.
+    manual_style_requested = bool(style_config)
     style_config = dict(style_config or {})
     if effective_subtitle_mode == "tiktok":
         style_config["tiktok_style"] = True
@@ -10316,7 +10321,7 @@ def main(
                 break
 
         # Re-burn if the video doesn't exist, if force is True, if the SRT file was updated, or if the styling changed
-        if output_path.exists() and not force and not style_changed and srt_path.exists() and (srt_path.stat().st_mtime <= output_path.stat().st_mtime):
+        if output_path.exists() and not force_burn and not style_changed and srt_path.exists() and (srt_path.stat().st_mtime <= output_path.stat().st_mtime):
             print(f"Existing output video found, and subtitles/styling are up-to-date. Skipping burn: {output_path}")
         else:
             if style_changed:
@@ -10324,7 +10329,7 @@ def main(
             elif srt_path.exists() and output_path.exists() and (srt_path.stat().st_mtime > output_path.stat().st_mtime):
                 print("Subtitles file updated. Re-burning video...")
             
-            if style_config is not None:
+            if manual_style_requested:
                 effective_style_config = dict(style_config)
                 visual_style_report = {
                     "enabled": False,
@@ -10347,7 +10352,7 @@ def main(
                 str(output_path),
                 lang_code=burn_lang_code,
                 style_config=effective_style_config,
-                manual_style=style_config is not None,
+                manual_style=manual_style_requested,
             )
             if rendered_style_config:
                 effective_style_config = rendered_style_config
@@ -12684,10 +12689,10 @@ def main(
         else:
             print("\nStep 5: Burning subtitles into video...")
             output_path = output_root / f"{base}{mp4_suffix}_subtitled_{srt_lang_code}.mp4"
-            if output_path.exists() and not force:
+            if output_path.exists() and not force_burn:
                 print(f"Existing output video found. Skipping burn: {output_path}")
             else:
-                manual_style = style_config is not None
+                manual_style = manual_style_requested
                 style_config, visual_style_report = resolve_visual_style_for_video(
                     str(video_path_obj),
                     output_root,
