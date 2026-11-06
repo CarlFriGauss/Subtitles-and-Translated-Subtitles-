@@ -250,10 +250,10 @@ MODEL_CATALOG: Dict[Tuple[str, str], ModelCapabilities] = {
         translation=True,
         structured_output=True,
     ),
-    ("anthropic", "claude-3-5-sonnet-latest"): _model(
+    ("anthropic", "claude-sonnet-5-5"): _model(
         "anthropic",
-        "claude-3-5-sonnet-latest",
-        "Anthropic Claude Sonnet",
+        "claude-sonnet-5-5",
+        "Anthropic Claude Sonnet 5.5",
         translation=True,
         structured_output=True,
     ),
@@ -375,12 +375,12 @@ MODEL_GUIDE_METADATA: Dict[Tuple[str, str], Dict[str, Any]] = {
         "docs_url": "https://api-docs.deepseek.com/",
         "api_url": "https://platform.deepseek.com/api_keys",
     },
-    ("anthropic", "claude-3-5-sonnet-latest"): {
+    ("anthropic", "claude-sonnet-5-5"): {
         "provider_display": "Anthropic",
         "model_family": "Semantic translation LLM",
         "timing_description": "Translation only in SubGen",
-        "docs_url": "https://docs.anthropic.com/en/docs/about-claude/models/overview",
-        "api_url": "https://console.anthropic.com/settings/keys",
+        "docs_url": "https://platform.claude.com/docs/en/about-claude/models/overview",
+        "api_url": "https://platform.claude.com/settings/keys",
     },
 }
 
@@ -439,7 +439,7 @@ TRANSLATION_MODEL_DEFAULTS = {
     "openai": "gpt-4o",
     "google": "gemini-2.5-pro",
     "deepseek": "deepseek-chat",
-    "anthropic": "claude-3-5-sonnet-latest",
+    "anthropic": "claude-sonnet-5-5",
     "xai": "grok-4",
     "cohere": "command-a-plus-05-2026",
 }

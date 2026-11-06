@@ -31,6 +31,7 @@ align = [
     "whisperx>=3.3",
 ]
 desktop-build = ["pyinstaller>=6.10"]
+dev = ["pytest>=8", "ruff>=0.6", "tomli>=2; python_version < '3.11'"]
 cloud = [
     "boto3>=1.35",
     "cryptography>=43",
@@ -45,8 +46,12 @@ cloud = [
 SubGen = "subgen_cli:main"
 
 [tool.setuptools]
-py-modules = ["subgen_acoustic", "subgen_cli", "subgen_db", "subgen_drive", "subgen_editor", "subgen_longform", "subgen_mobile", "subgen_paths", "subgen_pipeline", "subgen_planner", "subgen_providers", "subgen_review", "subgen_transcription", "subgen_transcription_adapters", "subgen_utils", "subgen_version"]
+py-modules = ["subgen_acoustic", "subgen_cli", "subgen_db", "subgen_drive", "subgen_editor", "subgen_http", "subgen_longform", "subgen_mobile", "subgen_paths", "subgen_pipeline", "subgen_planner", "subgen_providers", "subgen_review", "subgen_transcription", "subgen_transcription_adapters", "subgen_utils", "subgen_version"]
 
 [tool.setuptools.packages.find]
 where = ["cloud"]
 include = ["subgen_cloud*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

@@ -20,6 +20,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
+from .db_security import lockdown_statements
+
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -183,7 +185,24 @@ def create_database(database_url):
         for column, sql_type in additions.items():
             if column not in existing:
                 connection.execute(text(f"ALTER TABLE cloud_jobs ADD COLUMN {column} {sql_type}"))
+    lock_down_data_api(engine)
     return engine, sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def lock_down_data_api(engine):
+    """Enable RLS and revoke Supabase Data API roles on every SubGen table.
+
+    Runs on every start (the statements are idempotent) so tables added later
+    are covered too. No-op on SQLite.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as connection:
+        roles = set(connection.execute(
+            text("SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')")
+        ).scalars())
+        for statement in lockdown_statements(Base.metadata.tables.keys(), roles):
+            connection.execute(text(statement))
 
 
 def get_or_create_user(session, subject, email=None):
