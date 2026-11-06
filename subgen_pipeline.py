@@ -24,7 +24,7 @@ def load_dotenv(env_path=None):
     if not path.exists():
         return
 
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -52,6 +52,7 @@ import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from tqdm import tqdm
+from subgen_http import post_for_json
 from subgen_db import (
     init_db,
     calculate_video_hash,
@@ -831,24 +832,17 @@ def build_multipart_form_data(fields, files):
 def post_openai_multipart(endpoint, fields, files, timeout=240, api_env_key="OPENAI_API_KEY"):
     api_key = require_openai_api_key(api_env_key)
     body, boundary = build_multipart_form_data(fields, files)
-    request = urllib.request.Request(
+    # Previously no retry at all: one 429 from a parallel chunk aborted the job.
+    return post_for_json(
         endpoint,
-        data=body,
-        headers={
+        body,
+        {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
-        method="POST",
+        timeout=timeout,
+        label="OpenAI request",
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI request failed: HTTP {e.code}: {error_body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"OpenAI request failed: {e}") from e
 
 
 def split_text_into_segment_count(text, segment_count):
@@ -5801,12 +5795,36 @@ def valid_hex_color(value, fallback):
     return fallback
 
 
+def stream_rotation_degrees(stream):
+    """Display rotation of an ffprobe video stream (side data or legacy tag)."""
+    for side_data in stream.get("side_data_list") or []:
+        if isinstance(side_data, dict) and side_data.get("rotation") not in (None, ""):
+            try:
+                return int(round(float(side_data["rotation"])))
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(round(float((stream.get("tags") or {}).get("rotate") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def display_dimensions(stream):
+    """Width/height as displayed: phone videos store landscape frames plus a
+    90/270 degree rotation, and ffmpeg auto-rotates them when burning."""
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    if stream_rotation_degrees(stream) % 180 != 0:
+        width, height = height, width
+    return width, height
+
+
 def probe_video_metadata(video_path):
     command = [
         "ffprobe",
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height:format=duration",
+        "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation:format=duration",
         "-of", "json",
         str(video_path),
     ]
@@ -5818,12 +5836,12 @@ def probe_video_metadata(video_path):
             encoding="utf-8",
             errors="replace",
             check=True,
+            timeout=120,
             **hidden_subprocess_kwargs(),
         )
         data = json.loads(result.stdout)
         stream = (data.get("streams") or [{}])[0]
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
+        width, height = display_dimensions(stream)
         duration = float((data.get("format") or {}).get("duration") or 0)
     except Exception:
         width = height = 0
@@ -6083,6 +6101,48 @@ def visual_style_bounds(video_metadata=None, tiktok_style=False):
 
 ARABIC_SCRIPT_SUBTITLE_LANGUAGES = {"ar", "fa", "ur", "ps", "sd"}
 
+# Languages written right to left. libass lays out every subtitle line with a
+# left-to-right base direction, so without explicit embedding a Hebrew line such
+# as "שלום, מה שלומך?" is burned with the question mark on the wrong side.
+RTL_SUBTITLE_LANGUAGES = {"he", "iw", "yi", "ar", "fa", "ur", "ps", "sd", "ckb", "ug", "dv"}
+_RTL_EMBEDDING = "\u202b"  # RIGHT-TO-LEFT EMBEDDING
+_POP_DIRECTIONAL = "\u202c"  # POP DIRECTIONAL FORMATTING
+
+
+def is_rtl_subtitle_language(lang_code):
+    base = re.split(r"[-_]", str(lang_code or "").strip().lower())[0]
+    return base in RTL_SUBTITLE_LANGUAGES
+
+
+def embed_rtl_line(line):
+    """Wrap one subtitle line so it renders with a right-to-left base direction."""
+    if not line.strip() or line.startswith(_RTL_EMBEDDING):
+        return line
+    return f"{_RTL_EMBEDDING}{line}{_POP_DIRECTIONAL}"
+
+
+def rtl_burn_srt_text(srt_text):
+    """Return SRT text whose subtitle lines carry RTL embedding marks.
+
+    Index and timing lines are left untouched. Used only for the copy that is
+    handed to ffmpeg; exported and approved SRT files are never modified.
+    """
+    blocks = re.split(r"\r?\n\s*\r?\n", str(srt_text).lstrip("\ufeff").strip("\r\n"))
+    rendered = []
+    for block in blocks:
+        lines = block.splitlines()
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is not None:
+            lines = lines[: timing_index + 1] + [embed_rtl_line(line) for line in lines[timing_index + 1:]]
+        rendered.append("\n".join(lines))
+    return "\n\n".join(rendered) + "\n"
+
+
+def subtitle_language_code(value):
+    """A usable language code, or None for placeholders such as 'auto'/'source'."""
+    code = str(value or "").strip()
+    return code if re.fullmatch(r"[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*", code) and code.lower() not in {"auto", "src"} else None
+
 
 def uses_arabic_script_subtitle_font(lang_code):
     return str(lang_code or "").lower().split("-")[0] in ARABIC_SCRIPT_SUBTITLE_LANGUAGES
@@ -6093,7 +6153,57 @@ def bundled_subtitle_fonts_dir():
 
 
 def escape_ffmpeg_filter_path(path):
+    """Deprecated: kept for external callers. Use build_subtitles_filter()."""
     return str(Path(path)).replace("\\", "/").replace(":", "\\:")
+
+
+_SAFE_FONT_NAME = re.compile(r"^[\w .-]{1,64}$")
+
+
+def sanitize_font_name(name, default="Arial"):
+    """Return a font family name that cannot break out of an ffmpeg/ASS style.
+
+    The font name is inserted into force_style; quotes, commas, colons, '=' or
+    brackets would let a caller inject extra style fields or ffmpeg filters.
+    """
+    candidate = str(name or "").strip()
+    return candidate if _SAFE_FONT_NAME.match(candidate) else default
+
+
+def escape_ffmpeg_filter_option(value):
+    """First escaping level: a value inside one filter's option list."""
+    return re.sub(r"([\\':])", r"\\\1", str(value))
+
+
+def escape_ffmpeg_filtergraph(description):
+    """Second escaping level: one filter description inside a filtergraph."""
+    return re.sub(r"([\\'\[\],;])", r"\\\1", str(description))
+
+
+def ffmpeg_filter_path(path):
+    """A path for a filter option: forward slashes, otherwise unchanged."""
+    return str(path).replace("\\", "/")
+
+
+def build_subtitles_filter(srt_path, original_size, force_style=None, fonts_dir=None):
+    """Build the -vf argument for ffmpeg's subtitles filter.
+
+    Every value is escaped at both levels described in ffmpeg's "Notes on
+    filtergraph escaping", so paths containing apostrophes, commas, colons or
+    brackets (e.g. "Don't stop.he.srt") work and cannot inject other filters.
+    ``force_style`` is a list of (field, value) pairs.
+    """
+    options = [
+        f"filename={escape_ffmpeg_filter_option(ffmpeg_filter_path(srt_path))}",
+        f"original_size={original_size}",
+        "charenc=UTF-8",
+    ]
+    if fonts_dir:
+        options.append(f"fontsdir={escape_ffmpeg_filter_option(ffmpeg_filter_path(fonts_dir))}")
+    if force_style:
+        style = ",".join(f"{field}={value}" for field, value in force_style)
+        options.append(f"force_style={escape_ffmpeg_filter_option(style)}")
+    return escape_ffmpeg_filtergraph("subtitles=" + ":".join(options))
 
 
 def apply_script_safe_subtitle_style(style_config, lang_code, video_metadata=None, manual_style=False):
@@ -6138,7 +6248,7 @@ def validate_visual_style(
     style = dict(base)
     raw_style = raw_style or {}
     bounds = visual_style_bounds(video_metadata, tiktok_style=tiktok_style)
-    style["font_name"] = str(raw_style.get("font_name") or base.get("font_name") or "Arial").strip() or "Arial"
+    style["font_name"] = sanitize_font_name(raw_style.get("font_name") or base.get("font_name") or "Arial")
     font_scale = str(raw_style.get("font_scale") or base.get("font_scale") or ("large" if tiktok_style else "normal")).strip().lower()
     scale_fraction = {
         "small": 0.20,
@@ -6305,7 +6415,7 @@ def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadat
         allow_position_change=False,
         manual_style=manual_style,
     )
-    font_name = style_config.get("font_name", "Arial")
+    font_name = sanitize_font_name(style_config.get("font_name", "Arial"))
     font_size = style_config.get("font_size", 20)
     primary_color = hex_to_ass_color(style_config.get("primary_color", "#FFFFFF"))
     text_outline_color = hex_to_ass_color(style_config.get("outline_color", "#000000"))
@@ -6320,25 +6430,24 @@ def subtitle_filter_for_style(srt_filename_relative, style_config, video_metadat
     margin_v = style_config.get("margin_v", 30)
     margin_l = style_config.get("margin_l", 20)
     margin_r = style_config.get("margin_r", 20)
-    fonts_dir = escape_ffmpeg_filter_path(bundled_subtitle_fonts_dir())
-    fonts_part = f"fontsdir='{fonts_dir}':" if font_name == "Amiri" else ""
-    return (
-        f"subtitles=filename='{srt_filename_relative}':"
-        f"original_size={original_size}:"
-        f"charenc=UTF-8:"
-        f"{fonts_part}"
-        f"force_style='FontName={font_name},"
-        f"FontSize={font_size},"
-        f"PrimaryColour={primary_color},"
-        f"OutlineColour={text_outline_color},"
-        f"BackColour={background_color},"
-        f"Shadow={shadow},"
-        f"Outline={outline_width},"
-        f"BorderStyle={border_style},"
-        f"Alignment={alignment},"
-        f"MarginV={margin_v},"
-        f"MarginL={margin_l},"
-        f"MarginR={margin_r}'"
+    return build_subtitles_filter(
+        srt_filename_relative,
+        original_size,
+        force_style=[
+            ("FontName", font_name),
+            ("FontSize", font_size),
+            ("PrimaryColour", primary_color),
+            ("OutlineColour", text_outline_color),
+            ("BackColour", background_color),
+            ("Shadow", shadow),
+            ("Outline", outline_width),
+            ("BorderStyle", border_style),
+            ("Alignment", alignment),
+            ("MarginV", margin_v),
+            ("MarginL", margin_l),
+            ("MarginR", margin_r),
+        ],
+        fonts_dir=bundled_subtitle_fonts_dir() if font_name == "Amiri" else None,
     )
 
 
@@ -6359,18 +6468,21 @@ def render_visual_style_previews(video_path, srt_path, output_root, candidates, 
             timestamp = (float(segment["start"]) + float(segment["end"])) / 2
             duration = max(2.0, min(5.0, float(segment["end"]) - float(segment["start"])))
             preview_srt_path = preview_root / f"{candidate['candidate_id']}_{index}.srt"
+            preview_text = segment["text"]
+            if is_rtl_subtitle_language(lang_code):
+                preview_text = "\n".join(embed_rtl_line(line) for line in str(preview_text).split("\n"))
             write_srt(
                 [{
                     "start": 0.0,
                     "end": duration,
-                    "text": segment["text"],
+                    "text": preview_text,
                 }],
                 preview_srt_path,
             )
             try:
                 preview_srt_relative = preview_srt_path.relative_to(cwd_dir).as_posix()
             except ValueError:
-                preview_srt_relative = str(preview_srt_path).replace("\\", "/").replace(":", "\\:")
+                preview_srt_relative = str(preview_srt_path)
             vf_arg = subtitle_filter_for_style(
                 preview_srt_relative,
                 candidate["style"],
@@ -6670,42 +6782,16 @@ def call_openai_structured_json(
         },
     }
 
-    import time
-    import random
-
-    max_retries = 3
-    base_delay = 2.0
-    response_data = None
-
-    for attempt in range(max_retries + 1):
-        request = urllib.request.Request(
-            "https://api.openai.com/v1/responses",
-            data=json.dumps(request_payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=240) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-                break
-        except urllib.error.HTTPError as e:
-            if (e.code == 429 or 500 <= e.code < 600) and attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                print(f"OpenAI translation HTTP {e.code} error. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            error_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"{error_label} failed: HTTP {e.code}: {error_body}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt < max_retries:
-                delay = base_delay * (2 ** attempt) + random.uniform(0.1, 1.0)
-                print(f"OpenAI translation network error: {e}. Retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-                continue
-            raise RuntimeError(f"{error_label} failed: {e}") from e
+    response_data = post_for_json(
+        "https://api.openai.com/v1/responses",
+        json.dumps(request_payload).encode("utf-8"),
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=240,
+        label=error_label,
+    )
 
     response_text = extract_response_text(response_data)
     if not response_text:
@@ -6815,48 +6901,35 @@ def translate_segments_openai(
         f"effective semantic batch={batch_size})..."
     )
 
-    # 1. Define all batches
-    batches = []
-    for batch_start in range(0, len(indexed_segments), batch_size):
-        batch_end = min(len(indexed_segments), batch_start + batch_size)
+    if not indexed_segments:
+        return []
+
+    def build_prompt(batch_start, batch_end):
         context_start = max(0, batch_start - context_window)
         context_end = min(len(indexed_segments), batch_end + context_window)
-        prompt = build_llm_translation_prompt(
+        return build_llm_translation_prompt(
             indexed_segments[context_start:context_end],
             batch_start,
             batch_end,
         )
-        batches.append((batch_start, batch_end, prompt))
 
-    # 2. Translate in parallel
-    from concurrent.futures import ThreadPoolExecutor
-    
-    def translate_batch(batch_info):
-        batch_start, batch_end, prompt = batch_info
+    def request_batch(prompt):
         if provider_id == "openai":
-            response_json = call_openai_structured_translation(
+            return call_openai_structured_translation(
                 prompt,
                 instructions,
                 model,
                 api_env_key=(provider_config or {}).get("openai_api_env_key", "OPENAI_API_KEY"),
             )
-        else:
-            response_json = call_provider_translation(
-                provider_config or {},
-                provider_id,
-                prompt,
-                instructions,
-                model=model,
-            )
-        return batch_start, batch_end, response_json
+        return call_provider_translation(
+            provider_config or {},
+            provider_id,
+            prompt,
+            instructions,
+            model=model,
+        )
 
-    print(f"Translating {len(batches)} batches in parallel...")
-    results = []
-    with ThreadPoolExecutor(max_workers=min(len(batches), 8)) as executor:
-        results = list(executor.map(translate_batch, batches))
-
-    # 3. Process results
-    for batch_start, batch_end, response_json in results:
+    def collect(batch_start, batch_end, response_json):
         record_usage_event(
             provider_config,
             provider_id,
@@ -6864,19 +6937,73 @@ def translate_segments_openai(
             "translation",
             usage=response_json.pop("_usage", None),
         )
-
-        for item in response_json.get("translations", []):
-            index = item.get("index")
-            if batch_start <= index < batch_end:
-                translated_by_index[index] = apply_glossary_to_translation(
+        found = {}
+        for item in response_json.get("translations") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                index = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            text = item.get("text")
+            # Models sometimes return the index as a string, or repeat an
+            # index; the first usable answer for each index wins.
+            if batch_start <= index < batch_end and text is not None and index not in found:
+                found[index] = apply_glossary_to_translation(
                     indexed_segments[index]["text"],
-                    item.get("text"),
+                    text,
                     glossary,
                 )
+        return found
 
-        missing = [index for index in range(batch_start, batch_end) if index not in translated_by_index]
-        if missing:
-            raise RuntimeError(f"OpenAI translation response missed subtitle indices: {missing}")
+    def translate_range(batch_start, batch_end):
+        """Translate one range; retry once, then split it in half.
+
+        Only malformed or incomplete responses (bad JSON, missing indices,
+        truncation) are retried. Provider errors such as authentication or
+        quota failures propagate immediately, so they are never re-billed.
+        """
+        last_problem = None
+        for _attempt in range(2):
+            try:
+                response_json = request_batch(build_prompt(batch_start, batch_end))
+                found = collect(batch_start, batch_end, response_json)
+            except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                last_problem = f"unusable response ({exc})"
+                continue
+            missing = [index for index in range(batch_start, batch_end) if index not in found]
+            if not missing:
+                return found
+            last_problem = f"response missed subtitle indices {missing}"
+        if batch_end - batch_start > 1:
+            middle = (batch_start + batch_end) // 2
+            print(
+                f"[TRANSLATION] Batch {batch_start}-{batch_end - 1}: {last_problem}; "
+                "retrying as two smaller batches."
+            )
+            found = translate_range(batch_start, middle)
+            found.update(translate_range(middle, batch_end))
+            return found
+        raise RuntimeError(
+            f"{provider_id} translation failed for subtitle index {batch_start}: {last_problem}"
+        )
+
+    # 1. Define all batches
+    batches = [
+        (batch_start, min(len(indexed_segments), batch_start + batch_size))
+        for batch_start in range(0, len(indexed_segments), batch_size)
+    ]
+
+    # 2. Translate in parallel
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"Translating {len(batches)} batches in parallel...")
+    with ThreadPoolExecutor(max_workers=min(len(batches), 8)) as executor:
+        results = list(executor.map(lambda batch: translate_range(*batch), batches))
+
+    # 3. Merge results
+    for found in results:
+        translated_by_index.update(found)
 
     return [
         {
@@ -7366,21 +7493,64 @@ def merge_transcript_chunks(chunk_texts, max_overlap_words=120, min_overlap_word
     return merged_text, merge_info
 
 
+def _boundary_match_tokens(text):
+    return [token for token in re.findall(r"\w+", unicodedata.normalize("NFKC", str(text or "")).casefold())]
+
+
+def remove_boundary_repeat(previous_text, new_text, min_overlap_words=2):
+    """Drop the words at the end of ``previous_text`` that ``new_text`` repeats.
+
+    A chunk that ends mid-sentence yields "we went to the"; the next chunk,
+    which starts earlier because chunks overlap, yields "we went to the
+    store". Returns (trimmed_previous_text, removed_word_count).
+    """
+    previous_words = str(previous_text or "").split()
+    previous_tokens = [_boundary_match_tokens(word) for word in previous_words]
+    new_tokens = _boundary_match_tokens(new_text)
+    flat_previous = [token for tokens in previous_tokens for token in tokens]
+    best = 0
+    for size in range(min(len(flat_previous), len(new_tokens)), 0, -1):
+        if flat_previous[-size:] == new_tokens[:size]:
+            best = size
+            break
+    if best < min_overlap_words and best != len(flat_previous):
+        return previous_text, 0
+    if best == 0:
+        return previous_text, 0
+    # Map the matched token count back to whole words of the original text.
+    remaining_tokens = best
+    cut = len(previous_words)
+    while cut > 0 and remaining_tokens > 0:
+        cut -= 1
+        remaining_tokens -= len(previous_tokens[cut])
+    return " ".join(previous_words[:cut]), len(previous_words) - cut
+
+
 def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
     accepted_segments = []
     merge_info = []
+    groups = list(chunk_segment_groups or [])
 
-    for group in chunk_segment_groups or []:
+    for group_position, group in enumerate(groups):
         segments = group.get("segments") or []
         chunk_index = int(group.get("index") or 1)
         duplicate_cutoff = float(group.get("start") or 0.0)
         if chunk_index > 1:
             duplicate_cutoff += max(0.0, float(overlap_seconds or 0.0))
+        # A chunk re-transcribed with extra context audio can return speech past
+        # its own end; the next chunk transcribes that audio itself.
+        # Only when the directly following chunk produced segments: chunks that
+        # returned nothing are not in this list, and their audio would be lost.
+        next_group = groups[group_position + 1] if group_position + 1 < len(groups) else None
+        next_is_adjacent = bool(next_group) and int(next_group.get("index") or 0) == chunk_index + 1
+        group_end = float(group.get("end")) if next_is_adjacent and group.get("end") is not None else None
 
         kept = []
         skipped = []
         trimmed = []
         boundary_replacements = []
+        boundary_text_dedupes = []
+        beyond_chunk_end = 0
         for segment in segments:
             start = float(segment.get("start", 0.0))
             end = float(segment.get("end", start))
@@ -7391,6 +7561,31 @@ def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
             if chunk_index > 1 and end <= duplicate_cutoff:
                 skipped.append(segment)
                 continue
+            if group_end is not None and start >= group_end:
+                beyond_chunk_end += 1
+                continue
+
+            if (
+                chunk_index > 1
+                and granularity != "word"
+                and start < duplicate_cutoff < end
+                and accepted_segments
+                and accepted_segments[-1]["end"] > start
+            ):
+                previous = accepted_segments[-1]
+                trimmed_text, removed_words = remove_boundary_repeat(previous.get("text", ""), text)
+                if removed_words:
+                    boundary_text_dedupes.append({
+                        "previous_text": previous.get("text", ""),
+                        "kept_previous_text": trimmed_text,
+                        "removed_words": removed_words,
+                        "next_text": text,
+                    })
+                    if trimmed_text.strip():
+                        previous["text"] = normalize_subtitle_text(trimmed_text)
+                        previous["end"] = max(previous["start"], min(previous["end"], start))
+                    else:
+                        accepted_segments.pop()
 
             if (
                 chunk_index > 1
@@ -7446,6 +7641,8 @@ def merge_timed_transcript_segments(chunk_segment_groups, overlap_seconds=8):
                 "segments_trimmed": len(trimmed),
                 "trimmed_segments": trimmed[:5],
                 "boundary_word_replacements": boundary_replacements[:5],
+                "boundary_text_dedupes": boundary_text_dedupes[:5],
+                "segments_beyond_chunk_end": beyond_chunk_end,
             })
 
     accepted_segments.sort(key=lambda segment: (segment["start"], segment["end"]))
@@ -9989,6 +10186,22 @@ def write_srt(segments, srt_path):
 # Step 5: Burn subtitles
 # -----------------------------
 def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_config=None, manual_style=False):
+    """Burn subtitles; right-to-left languages are burned from a marked copy."""
+    if not is_rtl_subtitle_language(lang_code):
+        return _burn_subtitles_file(video_path, srt_path, output_path, lang_code, style_config, manual_style)
+    source = Path(srt_path).resolve()
+    burn_copy = source.with_name(f"{source.stem}.rtl-burn{source.suffix}")
+    burn_copy.write_text(rtl_burn_srt_text(source.read_text(encoding="utf-8-sig")), encoding="utf-8")
+    try:
+        return _burn_subtitles_file(video_path, burn_copy, output_path, lang_code, style_config, manual_style)
+    finally:
+        try:
+            burn_copy.unlink()
+        except OSError:
+            pass
+
+
+def _burn_subtitles_file(video_path, srt_path, output_path, lang_code=None, style_config=None, manual_style=False):
     video_path_obj = Path(video_path).resolve()
     srt_path_obj = Path(srt_path).resolve()
     output_path_obj = Path(output_path).resolve()
@@ -10004,7 +10217,7 @@ def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_conf
     try:
         srt_filename_relative = srt_path_obj.relative_to(cwd_dir).as_posix()
     except ValueError:
-        srt_filename_relative = str(srt_path_obj).replace("\\", "/").replace(":", "\\:")
+        srt_filename_relative = str(srt_path_obj)
     if output_path_obj.parent == cwd_dir:
         output_filename_argument = output_path_obj.name
     else:
@@ -10029,35 +10242,35 @@ def burn_subtitles(video_path, srt_path, output_path, lang_code=None, style_conf
         vf_arg = subtitle_filter_for_style(srt_filename_relative, style_config, video_metadata, lang_code=lang_code, manual_style=manual_style)
     else:
         # Default styles based on language
-        fonts_dir = escape_ffmpeg_filter_path(bundled_subtitle_fonts_dir())
-
         if uses_arabic_script_subtitle_font(lang_code):
-            vf_arg = (
-                f"subtitles=filename='{srt_filename_relative}':"
-                f"original_size={original_size}:"
-                f"charenc=UTF-8:"
-                f"fontsdir='{fonts_dir}':"
-                "force_style='FontName=Amiri,"
-                "FontSize=28,"
-                "PrimaryColour=&HFFFFFF&,"  # White
-                "OutlineColour=&H000000&,"  # Black
-                "BackColour=&H000000&,"     # Black
-                "Shadow=1,"
-                "Outline=1,"
-                "BorderStyle=3,"
-                "Alignment=2'"
+            vf_arg = build_subtitles_filter(
+                srt_filename_relative,
+                original_size,
+                force_style=[
+                    ("FontName", "Amiri"),
+                    ("FontSize", 28),
+                    ("PrimaryColour", "&HFFFFFF&"),  # White
+                    ("OutlineColour", "&H000000&"),  # Black
+                    ("BackColour", "&H000000&"),     # Black
+                    ("Shadow", 1),
+                    ("Outline", 1),
+                    ("BorderStyle", 3),
+                    ("Alignment", 2),
+                ],
+                fonts_dir=bundled_subtitle_fonts_dir(),
             )
         else:
-            vf_arg = (
-                f"subtitles=filename='{srt_filename_relative}':"
-                f"original_size={original_size}:"
-                f"charenc=UTF-8:"
-                "force_style='FontSize=20,"
-                "PrimaryColour=&HFFFFFF&,"
-                "OutlineColour=&H000000&,"
-                "Shadow=1,"
-                "Outline=1,"
-                "BorderStyle=3'"
+            vf_arg = build_subtitles_filter(
+                srt_filename_relative,
+                original_size,
+                force_style=[
+                    ("FontSize", 20),
+                    ("PrimaryColour", "&HFFFFFF&"),
+                    ("OutlineColour", "&H000000&"),
+                    ("Shadow", 1),
+                    ("Outline", 1),
+                    ("BorderStyle", 3),
+                ],
             )
 
     # ----------------------------------
@@ -10124,6 +10337,11 @@ def main(
     reuse_source_timing = cache_policy["reuse_source_timing"]
     reuse_translation = cache_policy["reuse_translation"]
     force = not reuse_translation
+    # "reburn" keeps every cached result but must still render a new video.
+    force_burn = bool(cache_policy.get("force_burn")) or force
+    # Decide this before tiktok_style is added below, which would make every
+    # style_config look user-supplied.
+    manual_style_requested = bool(style_config)
     style_config = dict(style_config or {})
     if effective_subtitle_mode == "tiktok":
         style_config["tiktok_style"] = True
@@ -10252,6 +10470,13 @@ def main(
         mp4_suffix = "_tiktok" if is_tiktok else ""
         burn_lang_code = target_language or "en"
         output_path = output_root / f"{base}{mp4_suffix}_subtitled_{burn_lang_code}.mp4"
+        # The file name keeps its historical "_en" suffix for source-language
+        # burns; fonts and text direction follow the language actually burned.
+        style_lang_code = (
+            subtitle_language_code(target_language)
+            or subtitle_language_code((approved_review or {}).get("source_language"))
+            or burn_lang_code
+        )
         effective_style_config = style_config or {}
         
         # Check if the subtitle styling has changed compared to the last run
@@ -10267,7 +10492,7 @@ def main(
                 break
 
         # Re-burn if the video doesn't exist, if force is True, if the SRT file was updated, or if the styling changed
-        if output_path.exists() and not force and not style_changed and srt_path.exists() and (srt_path.stat().st_mtime <= output_path.stat().st_mtime):
+        if output_path.exists() and not force_burn and not style_changed and srt_path.exists() and (srt_path.stat().st_mtime <= output_path.stat().st_mtime):
             print(f"Existing output video found, and subtitles/styling are up-to-date. Skipping burn: {output_path}")
         else:
             if style_changed:
@@ -10275,7 +10500,7 @@ def main(
             elif srt_path.exists() and output_path.exists() and (srt_path.stat().st_mtime > output_path.stat().st_mtime):
                 print("Subtitles file updated. Re-burning video...")
             
-            if style_config is not None:
+            if manual_style_requested:
                 effective_style_config = dict(style_config)
                 visual_style_report = {
                     "enabled": False,
@@ -10287,7 +10512,7 @@ def main(
                 effective_style_config, visual_style_report = resolve_visual_style_for_video(
                     str(video_path_obj),
                     output_root,
-                    burn_lang_code,
+                    style_lang_code,
                     style_config,
                     pipeline_config,
                     srt_path=str(srt_path),
@@ -10296,9 +10521,9 @@ def main(
                 str(video_path_obj),
                 str(srt_path),
                 str(output_path),
-                lang_code=burn_lang_code,
+                lang_code=style_lang_code,
                 style_config=effective_style_config,
-                manual_style=style_config is not None,
+                manual_style=manual_style_requested,
             )
             if rendered_style_config:
                 effective_style_config = rendered_style_config
@@ -12635,10 +12860,10 @@ def main(
         else:
             print("\nStep 5: Burning subtitles into video...")
             output_path = output_root / f"{base}{mp4_suffix}_subtitled_{srt_lang_code}.mp4"
-            if output_path.exists() and not force:
+            if output_path.exists() and not force_burn:
                 print(f"Existing output video found. Skipping burn: {output_path}")
             else:
-                manual_style = style_config is not None
+                manual_style = manual_style_requested
                 style_config, visual_style_report = resolve_visual_style_for_video(
                     str(video_path_obj),
                     output_root,

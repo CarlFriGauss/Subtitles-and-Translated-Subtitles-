@@ -124,3 +124,39 @@ def run_ffmpeg_with_progress(command, video_path, desc, cwd=None, interrupt_retr
                 f"Retrying ({attempt + 2}/{attempts})..."
             )
             time.sleep(0.5)
+
+
+def atomic_write_text(path, text, encoding="utf-8"):
+    """Write a file so a crash leaves either the old or the new content, never half.
+
+    The data is written to a sibling temporary file, flushed to disk, then
+    swapped in with os.replace (atomic on Windows and POSIX).
+    """
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with open(temporary, "w", encoding=encoding, newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def preserve_corrupt_file(path):
+    """Rename an unreadable file aside instead of silently discarding it.
+
+    Returns the backup path (or None). Callers then fall back to defaults,
+    but the user's previous settings can still be recovered by hand.
+    """
+    from pathlib import Path
+
+    path = Path(path)
+    backup = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        os.replace(path, backup)
+    except OSError:
+        return None
+    print(f"[WARNING] {path.name} could not be read and was moved to {backup.name}; defaults are used instead.")
+    return backup

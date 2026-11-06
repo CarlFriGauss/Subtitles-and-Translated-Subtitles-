@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from subgen_paths import CONFIG_PATH, ENV_PATH, SOURCE_DIR
+from subgen_utils import atomic_write_text, preserve_corrupt_file
 from subgen_version import __version__
 
 from subgen_pipeline import (
@@ -194,19 +195,12 @@ def migrate_config_values(config):
     # Preserve explicit transcription model choices. Pipeline planning depends on
     # the selected model's real capabilities, so migration must not substitute a
     # different audio model behind the user's back.
-    if config.get("llm_model") == "gpt-5.2":
-        config["llm_model"] = "gpt-4o"
-    if config.get("qa_model") == "gpt-5.2":
-        config["qa_model"] = "gpt-4o-mini"
-    if config.get("visual_style_model") == "gpt-5.2":
-        config["visual_style_model"] = "gpt-4o-mini"
-
     # Migrate provider_models if they exist
     provider_models = config.setdefault("provider_models", {})
     openai_models = provider_models.setdefault("openai", {})
     if not openai_models.get("transcription"):
         openai_models["transcription"] = "whisper-1"
-    if openai_models.get("translation") == "gpt-5.2" or not openai_models.get("translation"):
+    if not openai_models.get("translation"):
         openai_models["translation"] = "gpt-4o"
 
     # Clean up pricing config if it has the old keys
@@ -225,7 +219,10 @@ def load_config():
 
     try:
         loaded = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("configuration root must be an object")
     except Exception:
+        preserve_corrupt_file(CONFIG_PATH)
         return default_config()
 
     if "subtitle_mode" not in loaded:
@@ -254,32 +251,40 @@ def load_config():
 
 
 def save_config(config):
-    CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(CONFIG_PATH, json.dumps(config, indent=2, ensure_ascii=False))
+
+
+def credential_env_keys(config=None):
+    """Every environment variable name that can hold a provider API key."""
+    config = config if config is not None else load_config()
+    keys = {"OPENAI_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"}
+    try:
+        registry = get_provider_registry(config)
+    except Exception:
+        registry = {}
+    for provider in registry.values():
+        if isinstance(provider, dict) and provider.get("env_key"):
+            keys.add(provider["env_key"])
+    profile_groups = list((config.get("api_profiles") or {}).values())
+    profile_groups.append(config.get("openai_profiles") or {})
+    for profiles in profile_groups:
+        for profile in (profiles or {}).values():
+            if isinstance(profile, dict) and profile.get("env_key"):
+                keys.add(profile["env_key"])
+    return keys
 
 
 def read_env_values():
     values = {}
     if ENV_PATH.exists():
-        for raw_line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        for raw_line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
             line = raw_line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip()
     try:
         import keyring
-        credential_keys = {
-            "OPENAI_API_KEY",
-            "GOOGLE_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "ANTHROPIC_API_KEY",
-        }
-        for profiles in (load_config().get("api_profiles", {}) or {}).values():
-            credential_keys.update(
-                profile.get("env_key")
-                for profile in (profiles or {}).values()
-                if profile.get("env_key")
-            )
-        for key in credential_keys:
+        for key in credential_env_keys():
             stored = keyring.get_password("SubGen", key)
             if stored:
                 values[key] = stored
@@ -304,8 +309,25 @@ def write_env_values(values):
         "# SubGen provider API keys.",
         "# This file is ignored by git. Do not share it.",
     ]
-    lines.extend(f"{key}={value}" for key, value in sorted(values.items()))
+    # A newline inside a value would add extra KEY=VALUE lines on the next load.
+    lines.extend(
+        f"{key}={str(value).replace(chr(13), '').replace(chr(10), '')}"
+        for key, value in sorted(values.items())
+    )
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def load_api_keys():
+    """Load provider keys from .env AND the OS credential store into os.environ.
+
+    write_env_values() moves keys into the keyring and leaves .env holding only a
+    comment, so reading .env alone (what the CLI used to do) lost every key
+    after the first setup. Existing environment variables always win.
+    """
+    load_dotenv(ENV_PATH)
+    for key, value in read_env_values().items():
+        if value and key not in os.environ:
+            os.environ[key] = value
 
 
 def update_env_value(key, value):
@@ -752,7 +774,7 @@ def choose_default_providers(config):
 
 
 def run_setup(args=None):
-    load_dotenv(ENV_PATH)
+    load_api_keys()
     config = load_config()
     print("SubGen setup")
     ensure_env_file()
@@ -786,7 +808,7 @@ def configure_subtitle_style(config):
 
 
 def run_config(args=None):
-    load_dotenv(ENV_PATH)
+    load_api_keys()
     config = load_config()
     choice = choose_from_list(
         "Configuration",
@@ -812,7 +834,7 @@ def interactive_run(args=None):
         import argparse
         args = argparse.Namespace()
 
-    load_dotenv(ENV_PATH)
+    load_api_keys()
     config = load_config()
 
     if not config.get("setup_complete"):
@@ -995,7 +1017,7 @@ def print_languages(args=None):
 
 
 def print_providers(args=None):
-    load_dotenv(ENV_PATH)
+    load_api_keys()
     config = load_config()
     print("SubGen providers")
     for provider_id, provider in get_provider_registry(config).items():
@@ -1153,13 +1175,15 @@ def load_batch_state(output_root):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        # Losing batch progress would re-run (and re-bill) every item.
+        preserve_corrupt_file(path)
         return None
 
 
 def save_batch_state(output_root, state):
     path = batch_state_path(output_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(path, json.dumps(state, indent=2, ensure_ascii=False))
 
 
 def build_batch_pipeline_config(config, args, transcription_provider, translation_provider, openai_profile, openai_api_env_key, source_language, source_dialect):
@@ -1319,7 +1343,7 @@ def run_batch(args=None):
     if args is None:
         import argparse
         args = argparse.Namespace()
-    load_dotenv(ENV_PATH)
+    load_api_keys()
     config = load_config()
     if not config.get("setup_complete"):
         config = run_setup(args)

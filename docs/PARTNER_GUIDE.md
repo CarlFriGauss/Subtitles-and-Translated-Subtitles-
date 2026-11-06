@@ -224,18 +224,18 @@ The desktop installer is the simplest choice for a partner who does not need sou
 
 ### E1. Download and verify
 
-1. Open the [SubGen v0.4.1 release](https://github.com/CarlFriGauss/Subtitles-and-Translated-Subtitles-/releases/tag/v0.4.1).
-2. Download `SubGen_0.4.1_x64-setup.exe`.
+1. Open the [SubGen v0.4.4 release](https://github.com/CarlFriGauss/Subtitles-and-Translated-Subtitles-/releases/tag/v0.4.4).
+2. Download `SubGen_0.4.4_x64-setup.exe`.
 3. Calculate its SHA-256:
 
 ```powershell
-Get-FileHash "$HOME\Downloads\SubGen_0.4.1_x64-setup.exe" -Algorithm SHA256
+Get-FileHash "$HOME\Downloads\SubGen_0.4.4_x64-setup.exe" -Algorithm SHA256
 ```
 
 Expected value:
 
 ```text
-57DADD5AF9044CFE63BD12641D7033B8626687CFCD48A65EBC123136F61C2234
+6ED54D7F02623975AF3991D1AC5E3ED56630C031861D3B9EAAE7C9D0D098482E
 ```
 
 If the hash differs, delete the file and download it again from the release page.
@@ -248,7 +248,7 @@ If the hash differs, delete the file and download it again from the release page
 
 The installer is per-user and includes the frozen Python backend, desktop shell, web assets, FFmpeg/ffprobe, fonts, and alignment dependencies. Python, Conda, Rust, Node.js, and a separate FFmpeg installation are not required.
 
-Application data is stored under `%LOCALAPPDATA%\SubGen`. Treat that directory as private.
+Application data is stored under `%LOCALAPPDATA%\com.subgen.studio`. Treat that directory as private.
 
 ### E3. Use
 
@@ -267,7 +267,7 @@ The first local-model operation may download model files. API calls may incur pr
 This is private-LAN access to the Windows application, not cloud hosting.
 
 1. Connect the Windows computer and phone to the same trusted private network.
-2. Start SubGen on Windows and open **Mobile Access**.
+2. Start SubGen on Windows, open **Mobile Access**, and turn on **Allow phones on this network to connect**. Phone access is off by default, and SubGen then accepts connections from the Windows computer only.
 3. Scan the displayed QR code with the phone.
 4. If Windows Firewall asks, allow access on private networks only.
 5. Approve local-network access on the phone if the operating system requests it.
@@ -291,7 +291,7 @@ For a fixed release snapshot:
 
 ```text
 git fetch --tags
-git switch --detach v0.4.1
+git switch --detach v0.4.4
 ```
 
 ### G2. Required services

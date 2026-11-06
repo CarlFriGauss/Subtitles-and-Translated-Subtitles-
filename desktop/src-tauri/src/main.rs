@@ -75,8 +75,13 @@ fn connect_window_to_backend(handle: tauri::AppHandle) {
 }
 
 fn backend_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Ok(configured) = std::env::var("SUBGEN_BACKEND_EXE") {
-        return Ok(PathBuf::from(configured));
+    // Development override only: in a release build an environment variable must
+    // not be able to swap the backend executable the installed app launches.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(configured) = std::env::var("SUBGEN_BACKEND_EXE") {
+            return Ok(PathBuf::from(configured));
+        }
     }
     let resources = app
         .path()

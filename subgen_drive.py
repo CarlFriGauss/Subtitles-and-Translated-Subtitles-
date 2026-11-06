@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from subgen_utils import atomic_write_text
 from subgen_paths import (
     DRIVE_BATCHES_DIR,
     GOOGLE_DRIVE_CLIENT_PATH,
@@ -145,7 +146,7 @@ def authorize_drive(open_browser=True):
             success_message="Google Drive is connected. You may close this browser tab.",
             open_browser=open_browser,
         )
-    GOOGLE_DRIVE_TOKEN_PATH.write_text(credentials.to_json(), encoding="utf-8")
+    atomic_write_text(GOOGLE_DRIVE_TOKEN_PATH, credentials.to_json())
     return credentials
 
 
@@ -158,7 +159,8 @@ def build_drive_service(require_connected=True):
     credentials = Credentials.from_authorized_user_file(str(GOOGLE_DRIVE_TOKEN_PATH), [DRIVE_SCOPE])
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
-        GOOGLE_DRIVE_TOKEN_PATH.write_text(credentials.to_json(), encoding="utf-8")
+        # A half-written token file would lose the refresh token for good.
+        atomic_write_text(GOOGLE_DRIVE_TOKEN_PATH, credentials.to_json())
     if not credentials.valid:
         raise RuntimeError("Google Drive authorization expired. Connect Drive again.")
     return build("drive", "v3", credentials=credentials, cache_discovery=False)

@@ -10,6 +10,7 @@ import uuid
 import shutil
 import argparse
 import io
+import ipaddress
 import math
 import time
 from copy import deepcopy
@@ -307,8 +308,32 @@ session_cleanup_lock = threading.Lock()
 pending_session_cleanup = set()
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MOBILE_SHARING_PATH = DATA_DIR / "mobile_access_sharing.json"
+
+
+def load_mobile_sharing_preference():
+    """Phone access is opt-in: off unless the user switched it on in Mobile Access."""
+    try:
+        return bool(json.loads(MOBILE_SHARING_PATH.read_text(encoding="utf-8")).get("enabled"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def save_mobile_sharing_preference(enabled):
+    MOBILE_SHARING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = MOBILE_SHARING_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
+    os.replace(temporary, MOBILE_SHARING_PATH)
+
+
+def remote_clients_allowed():
+    """True only when the server was started LAN-capable AND the user turned sharing on."""
+    return bool(mobile_access.get("enabled") and mobile_access.get("sharing"))
+
+
 mobile_access = {
     "enabled": False,
+    "sharing": False,
     "port": 8080,
     "token": None,
     "diagnostics": None,
@@ -1427,6 +1452,9 @@ def copy_results_to_output_dir(filename, job_dir=None, include_video=True):
 
 # Custom HTTP Request Handler
 class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
+    # Drop connections that stay idle; slow clients could otherwise hold threads forever.
+    timeout = 120
+
     def log_message(self, format, *args):
         # Suppress request logging to prevent terminal flooding from status polling
         pass
@@ -1435,9 +1463,10 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
         # Serve files from the 'web' folder for static requests
         root = Path(__file__).resolve().parent
         
-        # If the path is an API call, don't modify it
+        # API paths are never files. Returning them unchanged let the stdlib
+        # static handler open e.g. "/api/../Users/x/.ssh/id_rsa" from the drive root.
         if path.startswith('/api'):
-            return path
+            return str(root / "__not_found__")
             
         # Strip query parameters
         path_clean = urllib.parse.unquote(path.split('?')[0])
@@ -1459,7 +1488,7 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
     def request_is_authorized(self):
         if self.client_is_local():
             return True
-        if not mobile_access["enabled"]:
+        if not remote_clients_allowed():
             return False
         return token_matches(request_token(self.headers), mobile_access["token"])
 
@@ -1508,7 +1537,7 @@ class SubGenRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def send_pairing_page(self):
         body = b"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer"><title>Pair with SubGen</title><style>
+<meta name="referrer" content="same-origin"><title>Pair with SubGen</title><style>
 body{font-family:system-ui;background:#070a13;color:#f8fafc;display:grid;place-items:center;min-height:100vh;margin:0}
 main{width:min(28rem,calc(100% - 2rem));text-align:center}p{color:#94a3b8;line-height:1.6}.state{color:#22d3ee}
 </style></head><body><main><h1>Connecting to SubGen</h1><p class="state" id="state">Verifying this device...</p></main>
@@ -1520,7 +1549,11 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        # Not "no-referrer": under that policy browsers send "Origin: null" on
+        # POST, which the CSRF check rejects. The token lives in the URL
+        # fragment, which is never part of a Referer, and is removed with
+        # history.replaceState before the pairing request.
+        self.send_header("Referrer-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1539,14 +1572,77 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             mobile_access["diagnostics_at"] = now
         return mobile_access["diagnostics"]
 
-    def request_has_valid_origin(self):
-        if self.client_is_local():
+    def request_host_is_allowed(self):
+        """Reject DNS-rebinding requests.
+
+        A rebinding page reaches 127.0.0.1 under the attacker's own hostname, which
+        the browser puts in the Host header. SubGen is only ever addressed by
+        "localhost" or an IP literal (the desktop shell and mobile pairing URLs both
+        use IP addresses), so any other hostname is refused.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if not host:
+            return False
+        try:
+            hostname = urllib.parse.urlsplit(f"//{host}").hostname or ""
+        except ValueError:
+            return False
+        if hostname == "localhost":
             return True
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            return False
+
+    def request_has_valid_origin(self):
+        """Refuse cross-site requests, including ones from the local machine.
+
+        Loopback clients used to skip this check, so any website open in the
+        user's browser could POST to the local server (CSRF).
+        """
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            return False
         origin = self.headers.get("Origin")
         if not origin:
             return True
         parsed = urllib.parse.urlparse(origin)
         return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host")
+
+    def request_body_type_is_allowed(self):
+        """Require a non-simple Content-Type on POST bodies.
+
+        "text/plain" and form encodings can be sent cross-site without a CORS
+        preflight; application/json and application/octet-stream cannot.
+        """
+        try:
+            content_length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return False
+        if content_length <= 0:
+            return True
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        return content_type in {"application/json", "application/octet-stream"}
+
+    def reject_untrusted_request(self, method):
+        """Shared guard for every method. Returns True when a response was sent."""
+        def reject(message, status):
+            if method == "POST":
+                # Windows resets a connection closed with unread request data,
+                # and the client would never see this response.
+                self.discard_small_request_body()
+            self.close_connection = True
+            self.send_json({"error": message}, status)
+            return True
+
+        if not self.request_host_is_allowed():
+            return reject("Unrecognized Host header.", 403)
+        if method == "POST":
+            if not self.request_has_valid_origin():
+                return reject("Request origin does not match this SubGen server.", 403)
+            if not self.request_body_type_is_allowed():
+                return reject("Requests must use application/json.", 415)
+        return False
 
     def remote_path_is_allowed(self, path):
         if self.client_is_local():
@@ -1576,10 +1672,30 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                 continue
         return False
 
+    def do_HEAD(self):
+        # The stdlib HEAD handler calls send_head() directly and would skip the
+        # authorization check in do_GET, leaking file existence/size/mtime.
+        if self.reject_untrusted_request("HEAD"):
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if not self.request_is_authorized():
+            self.reject_unauthorized(api_request=path.startswith('/api'))
+            return
+        if path.startswith('/api'):
+            self.send_response(405)
+            self.send_header("Allow", "GET, POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_HEAD()
+
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
+
+        if self.reject_untrusted_request("GET"):
+            return
 
         if path == '/pair' and mobile_access["enabled"]:
             self.send_pairing_page()
@@ -1662,6 +1778,7 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
             urls = self.mobile_urls() if mobile_access["enabled"] else []
             self.send_json({
                 "enabled": bool(mobile_access["enabled"]),
+                "sharing": bool(mobile_access.get("sharing")),
                 "urls": urls,
                 "token_suffix": mobile_access["token"][-6:] if mobile_access["token"] else None,
                 "diagnostics": self.mobile_status(),
@@ -1672,6 +1789,9 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         if path == '/api/mobile/qr':
             if not self.client_is_local():
                 self.send_json({"error": "QR access is available on this computer only."}, 403)
+                return
+            if not remote_clients_allowed():
+                self.send_json({"error": "Turn on phone access first."}, 409)
                 return
             urls = self.mobile_urls()
             if not urls:
@@ -1973,6 +2093,11 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
                 self.send_error(500, f"Waveform generation failed: {exc}")
             return
 
+        # Unknown API routes must never fall through to the static file handler.
+        if path.startswith('/api'):
+            self.send_json({"error": "Not found."}, 404)
+            return
+
         # Serve static files normally
         super().do_GET()
 
@@ -2021,6 +2146,9 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
 
+        if self.reject_untrusted_request("POST"):
+            return
+
         if path == '/api/mobile/pair':
             if not mobile_access["enabled"]:
                 self.send_json({"error": "Mobile access is disabled."}, 404)
@@ -2057,8 +2185,26 @@ if(!response.ok)throw new Error();state.textContent='Paired. Opening SubGen...';
         if not self.request_is_authorized():
             self.reject_unauthorized(api_request=True)
             return
-        if not self.request_has_valid_origin():
-            self.send_json({"error": "Request origin does not match this SubGen server."}, 403)
+
+        if path == '/api/mobile/sharing':
+            if not self.client_is_local():
+                self.send_json({"error": "Only the desktop app can change phone access."}, 403)
+                return
+            if not mobile_access["enabled"]:
+                self.send_json({"error": "This SubGen server was started without network support."}, 409)
+                return
+            try:
+                content_length = min(int(self.headers.get('Content-Length', 0)), 4096)
+                data = json.loads(self.rfile.read(content_length).decode('utf-8') or "{}")
+                enabled = data.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled must be true or false")
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                self.send_json({"error": "Send {\"enabled\": true} or {\"enabled\": false}."}, 400)
+                return
+            mobile_access["sharing"] = enabled
+            save_mobile_sharing_preference(enabled)
+            self.send_json({"sharing": enabled})
             return
 
         if path == '/api/mobile/rotate':
@@ -2912,6 +3058,11 @@ class SubGenThreadingServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
     daemon_threads = True
 
+    def verify_request(self, request, client_address):
+        # While phone access is off, connections from other machines are closed
+        # before any HTTP parsing, even though the socket listens on all interfaces.
+        return is_loopback_address(client_address[0]) or remote_clients_allowed()
+
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(
@@ -2924,6 +3075,7 @@ class SubGenThreadingServer(socketserver.ThreadingTCPServer):
 
 def run_server(port=8080, host="127.0.0.1", open_browser=True, lan_access=False):
     mobile_access["enabled"] = bool(lan_access)
+    mobile_access["sharing"] = bool(lan_access) and load_mobile_sharing_preference()
     mobile_access["port"] = int(port)
     mobile_access["token"] = load_or_create_access_token(MOBILE_TOKEN_PATH) if lan_access else None
 

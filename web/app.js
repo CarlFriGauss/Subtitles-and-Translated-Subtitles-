@@ -99,6 +99,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const mobileAccessUnavailable = document.getElementById('mobile-access-unavailable');
     const mobileNetworkSelect = document.getElementById('mobile-network-select');
     const mobileNetworkLabel = document.getElementById('mobile-network-label');
+    const mobileSharingToggle = document.getElementById('mobile-sharing-enabled');
+    const mobileSharingOffNote = document.getElementById('mobile-sharing-off-note');
     const btnCopyMobileUrl = document.getElementById('btn-copy-mobile-url');
     const btnRefreshMobileAccess = document.getElementById('btn-refresh-mobile-access');
     const btnRepairMobileAccess = document.getElementById('btn-repair-mobile-access');
@@ -208,6 +210,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // requests and lets a suspended or reloaded page recover from server state.
     let pollIntervalId = null;
     let statusPollInFlight = false;
+    // Incremented by stopPollingStatus(); a response from an older generation
+    // belongs to a job the user already left and is ignored.
+    let statusPollGeneration = 0;
+    let statusPollController = null;
+    const STATUS_POLL_TIMEOUT_MS = 15000;
     let reviewTransitionInFlight = false;
     let lastStatusReadError = null;
 
@@ -918,6 +925,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function addLog(message, type = 'info') {
         const line = document.createElement('div');
         line.className = `log-line ${type}`;
+        line.dir = 'auto';
         
         // Format time
         const now = new Date();
@@ -967,6 +975,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function startPipelineProcess() {
         if (state.pipelinePlanValid === false) {
             addLog('[ERROR] Resolve the pipeline configuration warning before starting.', 'error');
+            runningBadge.style.display = 'none';
+            btnStartProcess.disabled = false;
             return;
         }
         // Get form values
@@ -1027,9 +1037,10 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestData)
         })
-        .then(res => {
-            if (!res.ok) throw new Error('Failed to start pipeline processing');
-            return res.json();
+        .then(async res => {
+            const data = await readJsonResponse(res);
+            if (!res.ok) throw new Error(data.error || `Failed to start pipeline processing (HTTP ${res.status})`);
+            return data;
         })
         .then(data => {
             updateProgress(5, 'Job accepted. Starting pipeline...');
@@ -1164,6 +1175,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function stopPollingStatus() {
+        statusPollGeneration += 1;
+        if (statusPollController) {
+            statusPollController.abort();
+            statusPollController = null;
+        }
+        statusPollInFlight = false;
         if (pollIntervalId !== null) {
             clearTimeout(pollIntervalId);
             pollIntervalId = null;
@@ -1303,32 +1320,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function pollProcessStatus({ restoreLogs = false } = {}) {
         if (statusPollInFlight) return;
+        const generation = statusPollGeneration;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), STATUS_POLL_TIMEOUT_MS);
+        statusPollController = controller;
         statusPollInFlight = true;
         pollIntervalId = null;
         let continuePolling = false;
 
         try {
-            const response = await fetch(statusUrlForCurrentJob(), { cache: 'no-store' });
+            const response = await fetch(statusUrlForCurrentJob(), { cache: 'no-store', signal: controller.signal });
+            if (generation !== statusPollGeneration) return;
             if (!response.ok) throw new Error(`Status request failed (${response.status})`);
             const data = await readJsonResponse(response);
+            if (generation !== statusPollGeneration) return;
             continuePolling = await applyProcessStatus(data, { restoreLogs });
             if (lastStatusReadError) {
                 addLog('[SYSTEM] Job status connection restored.', 'success');
                 lastStatusReadError = null;
             }
         } catch (error) {
+            if (generation !== statusPollGeneration) return;  // cancelled by stopPollingStatus()
+            const message = error.name === 'AbortError' ? 'the server did not answer within 15 seconds' : error.message;
             console.error('Error polling status:', error);
-            if (lastStatusReadError !== error.message) {
-                addLog(`[ERROR] Unable to read job status: ${error.message}. Retrying automatically.`, 'error');
-                lastStatusReadError = error.message;
+            if (lastStatusReadError !== message) {
+                addLog(`[ERROR] Unable to read job status: ${message}. Retrying automatically.`, 'error');
+                lastStatusReadError = message;
             }
             continuePolling = Boolean(state.uploadJobId)
                 && !['waiting_for_review', 'completed', 'error'].includes(state.status);
         } finally {
-            statusPollInFlight = false;
+            clearTimeout(timeoutId);
+            if (statusPollController === controller) statusPollController = null;
+            if (generation === statusPollGeneration) statusPollInFlight = false;
         }
 
-        if (continuePolling) {
+        if (continuePolling && generation === statusPollGeneration) {
             pollIntervalId = setTimeout(() => {
                 void pollProcessStatus();
             }, lastStatusReadError ? 2000 : 1000);
@@ -1391,8 +1418,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function escapeHtml(text) {
-        if (!text) return '';
-        return text
+        if (text === null || text === undefined) return '';
+        return String(text)
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
@@ -1530,7 +1557,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     ? `<span class="issue-status">${issue.status === 'accepted' ? 'Accepted' : 'Resolved'}</span>`
                     : '';
             return `<div class="quality-issue ${severity === 'critical' ? 'error' : ''} ${resolved ? 'resolved' : ''}" data-cue-index="${cueIndex > 0 ? cueIndex : ''}" data-start-seconds="${issue.start_seconds ?? ''}">` +
-                `<button type="button" class="issue-jump"><span>${severity}</span><span class="issue-copy"><span>${escapeHtml(issue.message)}</span>${evidenceSummary ? `<small class="issue-evidence">${escapeHtml(evidenceSummary)}</small>` : ''}</span></button>${action}</div>`;
+                `<button type="button" class="issue-jump"><span>${severity}</span><span class="issue-copy"><span dir="auto">${escapeHtml(issue.message)}</span>${evidenceSummary ? `<small class="issue-evidence">${escapeHtml(evidenceSummary)}</small>` : ''}</span></button>${action}</div>`;
         }).join('');
         editorQualityIssues.querySelectorAll('[data-cue-index]').forEach(button => {
             button.querySelector('.issue-jump')?.addEventListener('click', () => {
@@ -1836,10 +1863,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadEditorDraft() {
         if (!state.videoHash) return;
+        const requestedHash = state.videoHash;
+        const requestedLanguage = state.targetLanguage || 'source';
         try {
-            const response = await fetch(`/api/editor/draft?video_hash=${encodeURIComponent(state.videoHash)}&target_language=${encodeURIComponent(state.targetLanguage || 'source')}`);
+            const response = await fetch(`/api/editor/draft?video_hash=${encodeURIComponent(requestedHash)}&target_language=${encodeURIComponent(requestedLanguage)}`);
             if (!response.ok) return;
             const data = await readJsonResponse(response);
+            // The user may have switched videos while this request was in flight.
+            if (state.videoHash !== requestedHash || (state.targetLanguage || 'source') !== requestedLanguage) return;
             if (data.draft?.segments?.length) state.segments = data.draft.segments;
             if (data.draft?.review) {
                 state.reviewIssues = data.draft.review.issues || [];
@@ -1855,11 +1886,14 @@ document.addEventListener('DOMContentLoaded', () => {
         editorSaveState.textContent = 'Unsaved';
         state.reviewApproval = null;
         clearTimeout(editorAutosaveTimer);
-        editorAutosaveTimer = setTimeout(() => saveEditorDraft().catch(() => {}), 700);
+        editorAutosaveTimer = setTimeout(() => {
+            saveEditorDraft().catch(error => console.warn('Subtitle autosave failed:', error));
+        }, 700);
     }
 
     function saveEditorDraft() {
-        if (!state.videoHash) return;
+        // Always return a Promise: callers chain .catch() on the result.
+        if (!state.videoHash) return Promise.resolve();
         clearTimeout(editorAutosaveTimer);
         const videoHash = state.videoHash;
         const driveContext = state.driveReviewContext;
@@ -2083,8 +2117,29 @@ document.addEventListener('DOMContentLoaded', () => {
         const response = await fetch('/api/mobile/access', { cache: 'no-store' });
         if (!response.ok) throw new Error('Mobile access settings are unavailable.');
         const data = await readJsonResponse(response);
-        state.mobileAccessUrls = data.urls || [];
+        const sharing = Boolean(data.sharing);
+        mobileSharingToggle.checked = sharing;
+        mobileSharingToggle.disabled = !data.enabled;
+        mobileSharingOffNote.hidden = sharing;
+        mobileSharingOffNote.textContent = data.enabled
+            ? 'Phone access is off. SubGen accepts connections from this computer only. Turn it on to show the pairing QR code.'
+            : 'This SubGen server was started without network support (no --lan), so phones cannot connect.';
         renderLastMobileDevice(data.last_device);
+        if (!sharing) {
+            state.mobileAccessUrls = [];
+            mobileNetworkSelect.innerHTML = '';
+            mobileNetworkSelect.hidden = true;
+            mobileNetworkLabel.hidden = true;
+            mobileAccessUrl.value = '';
+            mobileAccessQr.hidden = true;
+            mobileAccessQr.removeAttribute('src');
+            mobileAccessUnavailable.hidden = true;
+            mobileAccessIssues.hidden = true;
+            mobileAccessIndicator.className = 'status-indicator';
+            mobileAccessState.textContent = 'Phone access is off';
+            return;
+        }
+        state.mobileAccessUrls = data.urls || [];
         mobileNetworkSelect.innerHTML = '';
         state.mobileAccessUrls.forEach((entry, index) => {
             const option = document.createElement('option');
@@ -2122,6 +2177,25 @@ document.addEventListener('DOMContentLoaded', () => {
         element.addEventListener('click', () => { mobileAccessModal.hidden = true; });
     });
     mobileNetworkSelect.addEventListener('change', renderMobileAccessSelection);
+    mobileSharingToggle.addEventListener('change', async () => {
+        const enabled = mobileSharingToggle.checked;
+        mobileSharingToggle.disabled = true;
+        try {
+            const response = await fetch('/api/mobile/sharing', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            });
+            const data = await readJsonResponse(response);
+            if (!response.ok) throw new Error(data.error || 'Could not change phone access.');
+            await loadMobileAccess();
+        } catch (error) {
+            mobileSharingToggle.checked = !enabled;
+            mobileAccessState.textContent = error.message;
+        } finally {
+            mobileSharingToggle.disabled = false;
+        }
+    });
     btnCopyMobileUrl.addEventListener('click', async () => {
         if (!mobileAccessUrl.value) return;
         await navigator.clipboard.writeText(mobileAccessUrl.value);
@@ -2360,11 +2434,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
     btnRestart.addEventListener('click', () => {
         stopPollingStatus();
+        clearTimeout(editorAutosaveTimer);
+        editorAutosaveTimer = null;
         endCurrentVideoSession();
         // Reset state
         state.videoFile = null;
         state.videoPath = null;
+        state.videoHash = null;
         state.uploadJobId = null;
+        state.reviewApproval = null;
+        state.reviewIssues = [];
+        state.driveReviewContext = null;
         state.detectedLanguage = null;
         state.status = 'idle';
         state.progress = 0;
@@ -2650,8 +2730,8 @@ document.addEventListener('DOMContentLoaded', () => {
                                 html += `
                                     <div class="openai-profile-item ${p.active ? 'active' : ''}">
                                         <div class="api-status-info">
-                                            <span class="api-status-name" style="text-transform: capitalize;">${p.label}</span>
-                                            <span class="api-status-env">${p.env_key}</span>
+                                            <span class="api-status-name" style="text-transform: capitalize;">${escapeHtml(p.label)}</span>
+                                            <span class="api-status-env">${escapeHtml(p.env_key)}</span>
                                         </div>
                                         <div class="openai-profile-actions">
                                             <span class="api-status-badge ${p.configured ? 'configured' : 'missing'}">
@@ -3154,7 +3234,14 @@ document.addEventListener('DOMContentLoaded', () => {
         driveBatchPollId = null;
     }
 
+    // setInterval keeps firing while a slow request is still open; without these
+    // guards an older response could overwrite a newer one.
+    let driveBatchRefreshInFlight = false;
+    let driveStatusRefreshInFlight = false;
+
     async function refreshDriveBatch() {
+        if (driveBatchRefreshInFlight) return;
+        driveBatchRefreshInFlight = true;
         const suffix = state.driveBatchId ? `?id=${encodeURIComponent(state.driveBatchId)}` : '';
         try {
             const data = await driveJson(`/api/drive/batch/status${suffix}`, { cache: 'no-store' });
@@ -3162,6 +3249,8 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             showDriveMessage(driveFolderMessage, error.message, true);
             stopDriveBatchPolling();
+        } finally {
+            driveBatchRefreshInFlight = false;
         }
     }
 
@@ -3189,7 +3278,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function refreshDriveStatus() {
-        if (!driveConnectionState) return;
+        if (!driveConnectionState || driveStatusRefreshInFlight) return;
+        driveStatusRefreshInFlight = true;
         try {
             const status = await driveJson('/api/drive/status', { cache: 'no-store' });
             renderDriveConnection(status);
@@ -3201,6 +3291,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             showDriveMessage(driveAuthMessage, error.message, true);
+            // Stop polling on failure instead of repeating the error every 1.2 s.
+            if (driveAuthPollId) {
+                clearInterval(driveAuthPollId);
+                driveAuthPollId = null;
+            }
+        } finally {
+            driveStatusRefreshInFlight = false;
         }
     }
 
