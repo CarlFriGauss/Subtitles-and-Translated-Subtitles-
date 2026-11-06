@@ -5801,12 +5801,36 @@ def valid_hex_color(value, fallback):
     return fallback
 
 
+def stream_rotation_degrees(stream):
+    """Display rotation of an ffprobe video stream (side data or legacy tag)."""
+    for side_data in stream.get("side_data_list") or []:
+        if isinstance(side_data, dict) and side_data.get("rotation") not in (None, ""):
+            try:
+                return int(round(float(side_data["rotation"])))
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(round(float((stream.get("tags") or {}).get("rotate") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def display_dimensions(stream):
+    """Width/height as displayed: phone videos store landscape frames plus a
+    90/270 degree rotation, and ffmpeg auto-rotates them when burning."""
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    if stream_rotation_degrees(stream) % 180 != 0:
+        width, height = height, width
+    return width, height
+
+
 def probe_video_metadata(video_path):
     command = [
         "ffprobe",
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height:format=duration",
+        "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation:format=duration",
         "-of", "json",
         str(video_path),
     ]
@@ -5818,12 +5842,12 @@ def probe_video_metadata(video_path):
             encoding="utf-8",
             errors="replace",
             check=True,
+            timeout=120,
             **hidden_subprocess_kwargs(),
         )
         data = json.loads(result.stdout)
         stream = (data.get("streams") or [{}])[0]
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
+        width, height = display_dimensions(stream)
         duration = float((data.get("format") or {}).get("duration") or 0)
     except Exception:
         width = height = 0
