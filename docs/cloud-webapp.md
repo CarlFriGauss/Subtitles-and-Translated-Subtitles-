@@ -66,7 +66,7 @@ The production worker image defaults to `--once`; Compose explicitly overrides t
 ## Production Setup
 
 1. Use a dedicated Google Cloud project so the emergency stop cannot affect unrelated services.
-2. In Supabase, enable email magic links and collect the project reference, anon key, and pooled PostgreSQL URL. Add the final Vercel origin to Auth redirect URLs.
+2. In Supabase, enable email magic links and collect the project reference, anon key, and pooled PostgreSQL URL. Add the final Vercel origin to Auth redirect URLs. SubGen's tables live in the `public` schema, which Supabase exposes through its Data API to anyone holding the public anon key. The API and worker enable row-level security and revoke the `anon` and `authenticated` roles on every start; for a deployment created before that change, run `cloud/sql/lock_down_data_api.sql` once in the Supabase SQL editor and check that its final query shows `rowsecurity = true` and no API grants for every table.
 3. In R2, keep the bucket in Standard storage, create an S3 API token scoped only to that bucket, apply `cloud/r2-cors.json` after replacing the Vercel origin, and add a lifecycle rule deleting `users/` objects after two days.
 4. In Google Cloud Shell, clone this repository and branch and run `cloud/gcp/deploy.sh` with `ARM_PROCESSING=false`.
 5. Run `cloud/gcp/install-cost-kill-switch.sh` before arming processing.
